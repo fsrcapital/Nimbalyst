@@ -9,6 +9,8 @@ import { convertToWorkstreamAtom } from '../../store/atoms/sessions';
 import { SessionContextMenu } from './SessionContextMenu';
 import { FullTitleTooltip } from './FullTitleTooltip';
 import { sessionAgentWakePendingAtom } from '../../store/atoms/teamInbox';
+import type { SessionAttentionReason } from '@nimbalyst/runtime';
+import { SessionWorkflowPopover } from './SessionWorkflowPopover';
 
 /**
  * Combined status indicator that subscribes to this session's state atoms.
@@ -143,6 +145,11 @@ interface SessionListItemProps {
   uncommittedCount?: number; // Number of uncommitted files in this session
   branchedAt?: number; // Timestamp when this session was branched (branch tracking)
   phase?: string; // Kanban board phase (backlog, planning, implementing, validating, complete)
+  myNotes?: string;
+  nextAction?: string;
+  waitingOn?: string;
+  attentionReasons?: SessionAttentionReason[];
+  needsAttention?: boolean;
 }
 
 // Named rather than an inline arrow so the render profiler can report it by
@@ -180,6 +187,11 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
   uncommittedCount,
   branchedAt,
   phase,
+  myNotes,
+  nextAction,
+  waitingOn,
+  attentionReasons,
+  needsAttention = false,
 }) {
   const [isHovering, setIsHovering] = useState(false);
   const [showContextMenu, setShowContextMenu] = useState(false);
@@ -202,6 +214,7 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
   const hasInteractivePrompt = useAtomValue(sessionHasPendingInteractivePromptAtom(id));
   const hasPendingPromptAtom = useAtomValue(sessionPendingPromptAtom(id));
   const isAwaitingInput = hasInteractivePrompt || hasPendingPromptAtom;
+  const requiresAttention = isAwaitingInput || needsAttention;
 
   // Determine if this session can be dragged
   // Can drag if: (1) Has a parent (is a child session), OR (2) Is an orphan (no parent, no children)
@@ -454,9 +467,9 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
         ${isDragging ? 'dragging opacity-50 cursor-grabbing' : ''}
         ${isValidDropTarget ? 'drop-target-valid bg-[rgba(83,89,93,0.4)] border-2 border-dashed border-[var(--nim-primary)]' : ''}
         ${isDraggable ? 'cursor-grab' : ''}
-        ${isAwaitingInput && !isActive ? 'bg-[rgba(251,191,36,0.08)]' : ''}
+        ${requiresAttention && !isActive ? 'bg-[rgba(251,191,36,0.08)]' : ''}
       `}
-      style={isAwaitingInput ? { borderLeft: '2px solid var(--nim-warning)' } : undefined}
+      style={requiresAttention ? { borderLeft: '2px solid var(--nim-warning)' } : undefined}
       onClick={onClick}
       onMouseEnter={() => setIsHovering(true)}
       onMouseLeave={() => setIsHovering(false)}
@@ -475,7 +488,7 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
           onClick(e as unknown as React.MouseEvent);
         }
       }}
-      aria-label={`Session: ${displayTitle}, ${timestampLabel} ${relativeTime}${isLoaded ? ' (loaded in tab)' : ''}${isArchived ? ' (archived)' : ''}`}
+      aria-label={`Session: ${displayTitle}, ${timestampLabel} ${relativeTime}${waitingOn ? `, waiting on ${waitingOn}` : nextAction ? `, next action ${nextAction}` : ''}${isLoaded ? ' (loaded in tab)' : ''}${isArchived ? ' (archived)' : ''}`}
       aria-current={isActive ? 'page' : undefined}
     >
       <div className={`session-list-item-icon shrink-0 mt-0.5 text-[var(--nim-text-muted)] flex items-center relative ${isActive ? '[&]:text-[var(--nim-primary)] [&_svg]:text-[var(--nim-primary)]' : '[&_svg]:text-[var(--nim-text-muted)]'} ${isWorkstream ? 'workstream-icon' : ''} ${isWorktreeSession ? 'worktree-icon' : ''}`}>
@@ -538,6 +551,17 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
               {displayModel && <span className="session-list-item-model overflow-hidden text-ellipsis whitespace-nowrap">{displayModel}</span>}
               {phase && <SessionPhaseBadge phase={phase} />}
             </div>
+            {(waitingOn || nextAction) && (
+              <div
+                className={`session-list-item-workflow mt-0.5 flex min-w-0 items-center gap-1 text-[0.625rem] ${waitingOn ? 'text-[var(--nim-warning)]' : 'text-[var(--nim-text-muted)]'}`}
+                title={waitingOn ? `Waiting on: ${waitingOn}` : `Next action: ${nextAction}`}
+              >
+                <MaterialSymbol icon={waitingOn ? 'hourglass_top' : 'arrow_forward'} size={11} />
+                <span className="overflow-hidden text-ellipsis whitespace-nowrap">
+                  {waitingOn ? `Waiting: ${waitingOn}` : `Next: ${nextAction}`}
+                </span>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -547,6 +571,15 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
             {uncommittedCount}
           </span>
         )}
+        <SessionWorkflowPopover
+          sessionId={id}
+          myNotes={myNotes}
+          nextAction={nextAction}
+          waitingOn={waitingOn}
+          attentionReasons={attentionReasons}
+          hasPendingPrompt={isAwaitingInput}
+          isRowHovering={isHovering}
+        />
         <SessionStatusIndicator sessionId={id} messageCount={messageCount} />
         {/*{(onArchive || onUnarchive) && (*/}
         {/*  <button*/}
@@ -619,6 +652,11 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
     prev.projectPath === next.projectPath &&
     prev.uncommittedCount === next.uncommittedCount &&
     prev.branchedAt === next.branchedAt &&
-    prev.phase === next.phase
+    prev.phase === next.phase &&
+    prev.myNotes === next.myNotes &&
+    prev.nextAction === next.nextAction &&
+    prev.waitingOn === next.waitingOn &&
+    prev.attentionReasons === next.attentionReasons &&
+    prev.needsAttention === next.needsAttention
   );
 });

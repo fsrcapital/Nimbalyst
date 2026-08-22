@@ -16,11 +16,63 @@ import {
   sessionParentIdAtom,
 } from '../atoms/sessions';
 import { workstreamStateAtom } from '../atoms/workstreamState';
-import { sessionRefMapAtom, type SessionRefMeta } from '@nimbalyst/runtime';
+import {
+  normalizeSessionWorkflowMetadata,
+  resolveSessionAttention,
+  sessionRefMapAtom,
+  type SessionMeta,
+  type SessionRefMeta,
+} from '@nimbalyst/runtime';
 
 // Track pending refresh to debounce rapid-fire events
 let pendingRefreshTimer: NodeJS.Timeout | null = null;
 const DEBOUNCE_MS = 150; // Debounce rapid refreshes within 150ms
+
+export function applySessionMetadataUpdates(
+  meta: SessionMeta,
+  updates: Record<string, unknown>,
+): SessionMeta {
+  const hasPendingInteractivePrompt = updates.hasPendingPrompt !== undefined
+    ? updates.hasPendingPrompt === true
+    : meta.hasPendingInteractivePrompt;
+  const workflow = normalizeSessionWorkflowMetadata({
+    myNotes: updates.myNotes !== undefined ? updates.myNotes : meta.myNotes,
+    nextAction: updates.nextAction !== undefined ? updates.nextAction : meta.nextAction,
+    waitingOn: updates.waitingOn !== undefined ? updates.waitingOn : meta.waitingOn,
+    attentionReasons: updates.attentionReasons !== undefined
+      ? updates.attentionReasons
+      : meta.attentionReasons,
+  });
+  const attention = resolveSessionAttention({
+    workflow,
+    hasPendingPrompt: hasPendingInteractivePrompt,
+  });
+
+  return {
+    ...meta,
+    ...(updates.phase !== undefined && { phase: updates.phase as string }),
+    ...(updates.tags !== undefined && { tags: updates.tags as string[] }),
+    ...(updates.title !== undefined && { title: updates.title as string }),
+    ...(updates.provider !== undefined && { provider: updates.provider as string }),
+    ...(updates.model !== undefined && { model: updates.model as string }),
+    ...(updates.sessionType !== undefined && {
+      sessionType: updates.sessionType as 'session' | 'workstream' | 'blitz' | 'voice'
+    }),
+    ...(updates.agentRole !== undefined && { agentRole: updates.agentRole as 'standard' | 'meta-agent' }),
+    ...(updates.createdBySessionId !== undefined && { createdBySessionId: updates.createdBySessionId as string | null }),
+    ...(updates.parentSessionId !== undefined && { parentSessionId: updates.parentSessionId as string | null }),
+    ...(updates.worktreeId !== undefined && { worktreeId: updates.worktreeId as string | null }),
+    ...(updates.updatedAt !== undefined && { updatedAt: updates.updatedAt as number }),
+    ...(updates.isArchived !== undefined && { isArchived: updates.isArchived as boolean }),
+    ...(updates.isPinned !== undefined && { isPinned: updates.isPinned as boolean }),
+    hasPendingInteractivePrompt,
+    myNotes: workflow.myNotes,
+    nextAction: workflow.nextAction,
+    waitingOn: workflow.waitingOn,
+    attentionReasons: workflow.attentionReasons,
+    needsAttention: attention.needsAttention,
+  };
+}
 
 /**
  * Initialize session list IPC listeners.
@@ -64,24 +116,7 @@ export function initSessionListListeners(): () => void {
     const registry = new Map(store.get(sessionRegistryAtom));
     const meta = registry.get(sessionId);
     if (meta) {
-      registry.set(sessionId, {
-        ...meta,
-        ...(updates.phase !== undefined && { phase: updates.phase as string }),
-        ...(updates.tags !== undefined && { tags: updates.tags as string[] }),
-        ...(updates.title !== undefined && { title: updates.title as string }),
-        ...(updates.provider !== undefined && { provider: updates.provider as string }),
-        ...(updates.model !== undefined && { model: updates.model as string }),
-        ...(updates.sessionType !== undefined && {
-          sessionType: updates.sessionType as 'session' | 'workstream' | 'blitz' | 'voice'
-        }),
-        ...(updates.agentRole !== undefined && { agentRole: updates.agentRole as 'standard' | 'meta-agent' }),
-        ...(updates.createdBySessionId !== undefined && { createdBySessionId: updates.createdBySessionId as string | null }),
-        ...(updates.parentSessionId !== undefined && { parentSessionId: updates.parentSessionId as string | null }),
-        ...(updates.worktreeId !== undefined && { worktreeId: updates.worktreeId as string | null }),
-        ...(updates.updatedAt !== undefined && { updatedAt: updates.updatedAt as number }),
-        ...(updates.isArchived !== undefined && { isArchived: updates.isArchived as boolean }),
-        ...(updates.isPinned !== undefined && { isPinned: updates.isPinned as boolean }),
-      });
+      registry.set(sessionId, applySessionMetadataUpdates(meta, updates));
       store.set(sessionRegistryAtom, registry);
     }
   };

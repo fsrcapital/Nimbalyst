@@ -1,4 +1,5 @@
 import type { AgentRole, SessionData, SessionMode, SessionType, TranscriptViewMessage } from '../server/types';
+import type { SessionAttentionReason } from '../sessionWorkflow';
 
 // Type aliases for compatibility
 export type ChatMessage = TranscriptViewMessage;
@@ -41,6 +42,12 @@ export interface SessionMeta {
   tags?: string[];
   // Linked tracker item IDs (from metadata JSONB)
   linkedTrackerItemIds?: string[];
+  // Human workflow fields (from metadata JSONB)
+  myNotes?: string;
+  nextAction?: string;
+  waitingOn?: string;
+  attentionReasons?: SessionAttentionReason[];
+  needsAttention?: boolean;
   // Branch tracking - SEPARATE from hierarchical parentSessionId
   branchedFromSessionId?: string;
   branchPointMessageId?: number;

@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect } from 'vitest';
 import { buildSyncPayload } from '../SyncedSessionStore';
+import { buildClientMetadataFromRawForTest } from '../CollabV3Sync';
 import { SYNC_RELEVANT_FIELDS } from '../syncableMetadata';
 
 /**
@@ -32,6 +33,58 @@ describe('SYNC_RELEVANT_FIELDS.columns', () => {
   it('does not treat grouping fields as sort-relevant (no list re-sort on group change)', () => {
     expect(SYNC_RELEVANT_FIELDS.sortRelevantColumns).not.toContain('agentRole');
     expect(SYNC_RELEVANT_FIELDS.sortRelevantColumns).not.toContain('createdBySessionId');
+  });
+});
+
+describe('SYNC_RELEVANT_FIELDS.metadataKeys', () => {
+  it('carries the human workflow fields through encrypted client metadata', () => {
+    expect(SYNC_RELEVANT_FIELDS.metadataKeys).toEqual(
+      expect.arrayContaining(['myNotes', 'nextAction', 'waitingOn', 'attentionReasons']),
+    );
+
+    expect(buildSyncPayload({
+      metadata: {
+        myNotes: 'Review the retry behavior',
+        nextAction: 'Run manual test',
+        waitingOn: 'Test account',
+        attentionReasons: ['manual-testing'],
+      },
+    })).toEqual({
+      myNotes: 'Review the retry behavior',
+      nextAction: 'Run manual test',
+      waitingOn: 'Test account',
+      attentionReasons: ['manual-testing'],
+    });
+  });
+
+  it('maps workflow fields into the encrypted client-metadata payload for bulk sync', () => {
+    expect(buildClientMetadataFromRawForTest({
+      myNotes: '',
+      nextAction: 'Review the desktop fields',
+      waitingOn: 'CI',
+      attentionReasons: ['review', 'invalid', 'agent-handoff'],
+    })).toMatchObject({
+      myNotes: '',
+      nextAction: 'Review the desktop fields',
+      waitingOn: 'CI',
+      attentionReasons: ['review', 'agent-handoff'],
+    });
+  });
+
+  it('preserves explicit clear values for cross-device convergence', () => {
+    expect(buildSyncPayload({
+      metadata: {
+        myNotes: '',
+        nextAction: '',
+        waitingOn: '',
+        attentionReasons: [],
+      },
+    })).toEqual({
+      myNotes: '',
+      nextAction: '',
+      waitingOn: '',
+      attentionReasons: [],
+    });
   });
 });
 

@@ -17,6 +17,7 @@
  */
 
 import type { AgentMessage } from '../ai/server/types';
+import { isSessionAttentionReason } from '../ai/sessionWorkflow';
 import type { PersonalJwt, PersonalMemberId } from '../auth/jwtScopes';
 import { shouldSyncMessageForSessionRoom, truncateContentForSync } from './syncContentTruncator';
 import { appendSyncClientParams } from './syncClientInfo';
@@ -212,6 +213,10 @@ type DecryptedSessionIndexEntry = Omit<SessionIndexEntry, 'title' | 'encryptedTi
   queuedPrompts?: PlaintextQueuedPrompt[];  // Decrypted queued prompts
   currentContext?: { tokens: number; contextWindow: number };  // Decrypted from client metadata
   hasBeenNamed?: boolean;  // Decrypted from client metadata
+  myNotes?: string;
+  nextAction?: string;
+  waitingOn?: string;
+  attentionReasons?: SyncedSessionMetadata['attentionReasons'];
 };
 
 /** Encrypted create session request for wire protocol */
@@ -596,6 +601,14 @@ interface ClientMetadata {
   phase?: string;
   /** Arbitrary tags for categorization */
   tags?: string[];
+  /** Human-authored notes for supervising this session. */
+  myNotes?: string;
+  /** Next human or agent action recorded for this session. */
+  nextAction?: string;
+  /** What or whom currently blocks this session. */
+  waitingOn?: string;
+  /** Explicit attention categories; opaque to the server. */
+  attentionReasons?: SyncedSessionMetadata['attentionReasons'];
   /** Draft input text (unsent message) for cross-device sync */
   draftInput?: string;
   /** Epoch ms when draftInput was last updated by the sending device */
@@ -615,16 +628,24 @@ function buildClientMetadataFromRaw(
   const tokenUsage = metadata?.tokenUsage;
   const phase = metadata?.phase as string | undefined;
   const tags = metadata?.tags as string[] | undefined;
+  const myNotes = typeof metadata?.myNotes === 'string' ? metadata.myNotes : undefined;
+  const nextAction = typeof metadata?.nextAction === 'string' ? metadata.nextAction : undefined;
+  const waitingOn = typeof metadata?.waitingOn === 'string' ? metadata.waitingOn : undefined;
+  const attentionReasons = Array.isArray(metadata?.attentionReasons)
+    ? metadata.attentionReasons.filter(isSessionAttentionReason)
+    : undefined;
   const draftInput = metadata?.draftInput as string | undefined;
   const draftUpdatedAt = metadata?.draftUpdatedAt as number | undefined;
   const hasBeenNamed = options.hasBeenNamed;
   const hasTokenUsage = tokenUsage?.totalTokens && tokenUsage?.contextWindow;
   const hasPhaseOrTags = phase || (tags && tags.length > 0);
+  const hasWorkflowField = myNotes !== undefined || nextAction !== undefined ||
+    waitingOn !== undefined || attentionReasons !== undefined;
   // draftInput can be "" (explicit clear) - treat as meaningful
   const hasDraftField = draftInput !== undefined;
   const hasNamingMarker = hasBeenNamed !== undefined;
 
-  if (!hasTokenUsage && !hasPhaseOrTags && !hasDraftField && !hasNamingMarker) return undefined;
+  if (!hasTokenUsage && !hasPhaseOrTags && !hasWorkflowField && !hasDraftField && !hasNamingMarker) return undefined;
 
   const result: ClientMetadata = {};
   if (hasTokenUsage) {
@@ -635,11 +656,17 @@ function buildClientMetadataFromRaw(
   }
   if (phase) result.phase = phase;
   if (tags && tags.length > 0) result.tags = tags;
+  if (myNotes !== undefined) result.myNotes = myNotes;
+  if (nextAction !== undefined) result.nextAction = nextAction;
+  if (waitingOn !== undefined) result.waitingOn = waitingOn;
+  if (attentionReasons !== undefined) result.attentionReasons = attentionReasons;
   if (hasDraftField) result.draftInput = draftInput;
   if (draftUpdatedAt) result.draftUpdatedAt = draftUpdatedAt;
   if (hasNamingMarker) result.hasBeenNamed = hasBeenNamed;
   return result;
 }
+
+export { buildClientMetadataFromRaw as buildClientMetadataFromRawForTest };
 
 // Why: the lightweight `indexClientMetadataPatch` wire message added in
 // v0.63.0 (commit fe78de08f) is not understood by the Cloudflare collab
@@ -670,13 +697,18 @@ export { isIndexClientMetadataOnlyUpdate as isIndexClientMetadataOnlyUpdateForTe
 
 function buildClientMetadataFromCacheEntry(entry: Pick<
   CachedSessionIndex,
-  'currentContext' | 'hasPendingPrompt' | 'phase' | 'tags' | 'draftInput' | 'draftUpdatedAt' | 'hasBeenNamed'
+  'currentContext' | 'hasPendingPrompt' | 'phase' | 'tags' | 'myNotes' | 'nextAction' |
+  'waitingOn' | 'attentionReasons' | 'draftInput' | 'draftUpdatedAt' | 'hasBeenNamed'
 >): ClientMetadata | undefined {
   if (
     !entry.currentContext &&
     entry.hasPendingPrompt === undefined &&
     !entry.phase &&
     !entry.tags &&
+    entry.myNotes === undefined &&
+    entry.nextAction === undefined &&
+    entry.waitingOn === undefined &&
+    entry.attentionReasons === undefined &&
     entry.draftInput === undefined &&
     entry.hasBeenNamed === undefined
   ) {
@@ -688,6 +720,10 @@ function buildClientMetadataFromCacheEntry(entry: Pick<
     hasPendingPrompt: entry.hasPendingPrompt,
     phase: entry.phase,
     tags: entry.tags,
+    myNotes: entry.myNotes,
+    nextAction: entry.nextAction,
+    waitingOn: entry.waitingOn,
+    attentionReasons: entry.attentionReasons,
     draftInput: entry.draftInput,
     draftUpdatedAt: entry.draftUpdatedAt,
     hasBeenNamed: entry.hasBeenNamed,
@@ -908,6 +944,10 @@ interface CachedSessionIndex {
   phase?: string;
   /** Arbitrary tags for categorization */
   tags?: string[];
+  myNotes?: string;
+  nextAction?: string;
+  waitingOn?: string;
+  attentionReasons?: SyncedSessionMetadata['attentionReasons'];
   /** Unix timestamp ms when this session was last read by any device */
   lastReadAt?: number;
   /** Draft input text (unsent message) for cross-device sync */
@@ -1388,6 +1428,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
       hasPendingPrompt: 'hasPendingPrompt' in pending ? pending.hasPendingPrompt : cached.hasPendingPrompt,
       phase: 'phase' in pending ? (pending as any).phase : cached.phase,
       tags: 'tags' in pending ? (pending as any).tags : cached.tags,
+      myNotes: 'myNotes' in pending ? pending.myNotes : cached.myNotes,
+      nextAction: 'nextAction' in pending ? pending.nextAction : cached.nextAction,
+      waitingOn: 'waitingOn' in pending ? pending.waitingOn : cached.waitingOn,
+      attentionReasons: 'attentionReasons' in pending ? pending.attentionReasons : cached.attentionReasons,
       lastReadAt: 'lastReadAt' in pending ? (pending as any).lastReadAt : cached.lastReadAt,
       draftInput: 'draftInput' in pending ? (pending as any).draftInput : cached.draftInput,
       draftUpdatedAt: 'draftUpdatedAt' in pending ? (pending as any).draftUpdatedAt : cached.draftUpdatedAt,
@@ -2033,6 +2077,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                   let hasPendingPrompt: boolean | undefined;
                   let phase: string | undefined;
                   let tags: string[] | undefined;
+                  let myNotes: string | undefined;
+                  let nextAction: string | undefined;
+                  let waitingOn: string | undefined;
+                  let attentionReasons: SyncedSessionMetadata['attentionReasons'];
                   let draftInput: string | undefined;
                   let draftUpdatedAt: number | undefined;
                   let hasBeenNamed: boolean | undefined;
@@ -2043,6 +2091,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                       hasPendingPrompt = clientMeta.hasPendingPrompt;
                       phase = clientMeta.phase;
                       tags = clientMeta.tags;
+                      myNotes = clientMeta.myNotes;
+                      nextAction = clientMeta.nextAction;
+                      waitingOn = clientMeta.waitingOn;
+                      attentionReasons = clientMeta.attentionReasons;
                       draftInput = clientMeta.draftInput || undefined;
                       draftUpdatedAt = clientMeta.draftUpdatedAt;
                       hasBeenNamed = clientMeta.hasBeenNamed;
@@ -2079,6 +2131,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                     queuedPrompts,
                     hasPendingPrompt: hasPendingPrompt ?? entry.hasPendingPrompt,
                     currentContext,
+                    myNotes,
+                    nextAction,
+                    waitingOn,
+                    attentionReasons,
                     lastReadAt: entry.lastReadAt,
                   };
 
@@ -2111,6 +2167,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                     currentContext: decrypted.currentContext,
                     phase,
                     tags,
+                    myNotes,
+                    nextAction,
+                    waitingOn,
+                    attentionReasons,
                     draftInput,
                     draftUpdatedAt,
                     hasBeenNamed,
@@ -2251,6 +2311,12 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                 }
                 if (clientMeta.phase) decryptedEntry.phase = clientMeta.phase;
                 if (clientMeta.tags) decryptedEntry.tags = clientMeta.tags;
+                if (clientMeta.myNotes !== undefined) decryptedEntry.myNotes = clientMeta.myNotes;
+                if (clientMeta.nextAction !== undefined) decryptedEntry.nextAction = clientMeta.nextAction;
+                if (clientMeta.waitingOn !== undefined) decryptedEntry.waitingOn = clientMeta.waitingOn;
+                if (clientMeta.attentionReasons !== undefined) {
+                  decryptedEntry.attentionReasons = clientMeta.attentionReasons;
+                }
                 // Allow empty string through so "clear draft" propagates to renderer
                 if (clientMeta.draftInput !== undefined) decryptedEntry.draftInput = clientMeta.draftInput;
                 if (clientMeta.draftUpdatedAt !== undefined) decryptedEntry.draftUpdatedAt = clientMeta.draftUpdatedAt;
@@ -2992,6 +3058,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
         pending?.currentContext !== undefined ||
         pending?.phase !== undefined ||
         pending?.tags !== undefined ||
+        pending?.myNotes !== undefined ||
+        pending?.nextAction !== undefined ||
+        pending?.waitingOn !== undefined ||
+        pending?.attentionReasons !== undefined ||
         pending?.draftInput !== undefined ||
         pending?.draftUpdatedAt !== undefined ||
         pending?.hasBeenNamed !== undefined
@@ -3001,6 +3071,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
               hasPendingPrompt: cachedHasPendingPrompt,
               phase: pending?.phase ?? rawClientMeta?.phase,
               tags: pending?.tags ?? rawClientMeta?.tags,
+              myNotes: pending?.myNotes ?? rawClientMeta?.myNotes,
+              nextAction: pending?.nextAction ?? rawClientMeta?.nextAction,
+              waitingOn: pending?.waitingOn ?? rawClientMeta?.waitingOn,
+              attentionReasons: pending?.attentionReasons ?? rawClientMeta?.attentionReasons,
               draftInput: pending?.draftInput ?? rawClientMeta?.draftInput,
               draftUpdatedAt: pending?.draftUpdatedAt ?? rawClientMeta?.draftUpdatedAt,
               hasBeenNamed: pending?.hasBeenNamed ?? rawClientMeta?.hasBeenNamed,
@@ -3045,6 +3119,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
         hasPendingPrompt: cachedHasPendingPrompt,
         phase: clientMeta?.phase,
         tags: clientMeta?.tags,
+        myNotes: clientMeta?.myNotes,
+        nextAction: clientMeta?.nextAction,
+        waitingOn: clientMeta?.waitingOn,
+        attentionReasons: clientMeta?.attentionReasons,
         lastReadAt: cachedLastReadAt,
         draftInput: clientMeta?.draftInput,
         draftUpdatedAt: clientMeta?.draftUpdatedAt,
@@ -3374,6 +3452,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
             ('hasPendingPrompt' in change.metadata) ||
             ('phase' in change.metadata) ||
             ('tags' in change.metadata) ||
+            ('myNotes' in change.metadata) ||
+            ('nextAction' in change.metadata) ||
+            ('waitingOn' in change.metadata) ||
+            ('attentionReasons' in change.metadata) ||
             ('draftInput' in change.metadata) ||
             ('hasBeenNamed' in change.metadata);
           if (hasClientMetaFields && config.encryptionKey) {
@@ -3383,6 +3465,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
               hasPendingPrompt: 'hasPendingPrompt' in change.metadata ? change.metadata.hasPendingPrompt : cached?.hasPendingPrompt,
               phase: 'phase' in change.metadata ? (change.metadata as any).phase : cached?.phase,
               tags: 'tags' in change.metadata ? (change.metadata as any).tags : cached?.tags,
+              myNotes: 'myNotes' in change.metadata ? change.metadata.myNotes : cached?.myNotes,
+              nextAction: 'nextAction' in change.metadata ? change.metadata.nextAction : cached?.nextAction,
+              waitingOn: 'waitingOn' in change.metadata ? change.metadata.waitingOn : cached?.waitingOn,
+              attentionReasons: 'attentionReasons' in change.metadata ? change.metadata.attentionReasons : cached?.attentionReasons,
               draftInput: 'draftInput' in change.metadata ? (change.metadata as any).draftInput : cached?.draftInput,
               draftUpdatedAt: 'draftUpdatedAt' in change.metadata ? (change.metadata as any).draftUpdatedAt : cached?.draftUpdatedAt,
               hasBeenNamed: 'hasBeenNamed' in change.metadata ? (change.metadata as any).hasBeenNamed : cached?.hasBeenNamed,
@@ -3473,6 +3559,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
               hasPendingPrompt: 'hasPendingPrompt' in meta ? meta.hasPendingPrompt : cached.hasPendingPrompt,
               phase: 'phase' in meta ? (meta as any).phase : cached.phase,
               tags: 'tags' in meta ? (meta as any).tags : cached.tags,
+              myNotes: 'myNotes' in meta ? meta.myNotes : cached.myNotes,
+              nextAction: 'nextAction' in meta ? meta.nextAction : cached.nextAction,
+              waitingOn: 'waitingOn' in meta ? meta.waitingOn : cached.waitingOn,
+              attentionReasons: 'attentionReasons' in meta ? meta.attentionReasons : cached.attentionReasons,
               lastReadAt: 'lastReadAt' in meta ? (meta as any).lastReadAt : cached.lastReadAt,
               draftInput: 'draftInput' in meta ? (meta as any).draftInput : cached.draftInput,
               draftUpdatedAt: 'draftUpdatedAt' in meta ? (meta as any).draftUpdatedAt : cached.draftUpdatedAt,
@@ -3517,6 +3607,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
               hasPendingPrompt: meta.hasPendingPrompt,
               phase: (meta as any).phase,
               tags: (meta as any).tags,
+              myNotes: meta.myNotes,
+              nextAction: meta.nextAction,
+              waitingOn: meta.waitingOn,
+              attentionReasons: meta.attentionReasons,
               lastReadAt: (meta as any).lastReadAt,
               draftInput: (meta as any).draftInput,
               draftUpdatedAt: (meta as any).draftUpdatedAt,

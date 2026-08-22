@@ -45,7 +45,14 @@ export const SYNC_RELEVANT_FIELDS = {
    * wiring it cross-device means touching the encrypted client-metadata path,
    * which is a deliberate follow-up rather than a half-wired push.
    */
-  metadataKeys: ['phase', 'tags'] as const,
+  metadataKeys: [
+    'phase',
+    'tags',
+    'myNotes',
+    'nextAction',
+    'waitingOn',
+    'attentionReasons',
+  ] as const,
 
   /**
    * Subset of `columns` whose changes represent meaningful content activity
