@@ -104,7 +104,9 @@ export function scanIdentityScopeViolations({
               : null;
         if (!rule || hasEscape(lines, lineIndex)) return;
         const violation = {
-          file: path.relative(root, filePath),
+          // Baseline keys are repository paths and must remain stable across
+          // Windows and POSIX runners.
+          file: path.relative(root, filePath).split(path.sep).join('/'),
           line: lineIndex + 1,
           rule,
           source: line.trim(),
