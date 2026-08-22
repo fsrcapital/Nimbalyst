@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { decryptText, deriveEncryptionKey } from "../lib/crypto.ts";
 import { accountFromPayload, parsePairingPayload, syncHttpOrigin } from "../lib/pairing.ts";
+import { authSessionFromExchange, signInErrorMessage } from "../lib/stytchAuth.ts";
 
 const future = 2_000_000_000_000;
 const payload = {
@@ -50,4 +51,36 @@ test("matches the shared iOS, Android, and desktop AES-GCM test vector", async (
 
 test("converts WebSocket sync URLs to the matching HTTPS auth origin", () => {
   assert.equal(syncHttpOrigin("wss://sync.example"), "https://sync.example");
+});
+
+test("accepts an authenticated session only for the paired account and organization", () => {
+  const account = accountFromPayload(payload, 123);
+  const auth = authSessionFromExchange(account, {
+    member_authenticated: true,
+    session_token: "session-token",
+    session_jwt: "session-jwt",
+    member_id: "user-test-12345",
+    member: { member_id: "user-test-12345", email_address: "person@example.com" },
+    organization: { organization_id: "org-personal" },
+    member_session: { expires_at: "2030-01-01T00:00:00Z" },
+  });
+  assert.equal(auth.userId, "user-test-12345");
+  assert.equal(auth.orgId, "org-personal");
+  assert.equal(auth.expiresAt, "2030-01-01T00:00:00Z");
+
+  assert.throws(
+    () => authSessionFromExchange(account, {
+      member_authenticated: true,
+      session_token: "session-token",
+      session_jwt: "session-jwt",
+      member_id: "someone-else",
+      organization: { organization_id: "org-personal" },
+    }),
+    /different Nimbalyst account/,
+  );
+});
+
+test("explains when the hosted PWA domain has not been approved", () => {
+  const error = Object.assign(new Error("Domain not allowed"), { error_type: "bad_domain_for_stytch_sdk" });
+  assert.match(signInErrorMessage(error), /needs to be approved/);
 });

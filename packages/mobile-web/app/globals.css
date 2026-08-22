@@ -843,6 +843,29 @@ textarea:focus-visible {
   gap: 9px;
 }
 
+.otp-sign-in {
+  display: grid;
+  gap: 9px;
+}
+
+.otp-sign-in label {
+  color: #a39daa;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.otp-sign-in input {
+  width: 100%;
+  border: 1px solid #494052;
+  border-radius: 10px;
+  padding: 12px;
+  background: #0c0c0f;
+  color: var(--ink);
+  font: 650 20px/1 var(--font-geist-mono), monospace;
+  letter-spacing: 0.28em;
+  text-align: center;
+}
+
 .manual-pairing label {
   color: #85808c;
   font-size: 10px;

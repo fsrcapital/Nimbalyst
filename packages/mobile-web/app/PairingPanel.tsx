@@ -2,10 +2,10 @@
 /* eslint-disable @next/next/no-img-element -- the deployed vinext runtime cannot safely use next/image. */
 
 import { useEffect, useRef, useState } from "react";
-import { beginGoogleSignIn } from "../lib/auth";
 import { deriveEncryptionKey } from "../lib/crypto";
 import { accountFromPayload, parsePairingPayload, type PairingAccount } from "../lib/pairing";
-import { saveStoredPairing, type StoredPairing } from "../lib/pairingStore";
+import { saveAuthSession, saveStoredPairing, type StoredPairing } from "../lib/pairingStore";
+import { completePairingWithCode, sendPairingCode, signInErrorMessage } from "../lib/stytchAuth";
 
 type PairingPanelProps = {
   pairing?: StoredPairing;
@@ -19,6 +19,10 @@ export default function PairingPanel({ pairing, onPaired, onExploreDemo }: Pairi
   const [manualValue, setManualValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
+  const [otpCode, setOtpCode] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState("");
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const acceptPayload = async (value: string) => {
@@ -36,6 +40,33 @@ export default function PairingPanel({ pairing, onPaired, onExploreDemo }: Pairi
       setError(caught instanceof Error ? caught.message : "Pairing failed. Generate a new desktop code and try again.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const requestCode = async (account: PairingAccount) => {
+    setAuthBusy(true);
+    setAuthError("");
+    try {
+      await sendPairingCode(account);
+      setOtpSent(true);
+    } catch (caught) {
+      setAuthError(signInErrorMessage(caught));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const verifyCode = async (account: PairingAccount) => {
+    setAuthBusy(true);
+    setAuthError("");
+    try {
+      const auth = await completePairingWithCode(account, otpCode);
+      const updated = await saveAuthSession(auth);
+      onPaired(updated);
+    } catch (caught) {
+      setAuthError(signInErrorMessage(caught));
+    } finally {
+      setAuthBusy(false);
     }
   };
 
@@ -94,11 +125,33 @@ export default function PairingPanel({ pairing, onPaired, onExploreDemo }: Pairi
               <small>The raw desktop key was discarded and never sent to this website.</small>
             </div>
           </div>
-          <button className="pairing-primary" type="button" onClick={() => beginGoogleSignIn(account)}>
-            Continue with Google
-          </button>
+          {otpSent ? (
+            <form className="otp-sign-in" onSubmit={(event) => { event.preventDefault(); void verifyCode(account); }}>
+              <label htmlFor="sign-in-code">Enter the 6-digit code sent to {account.syncEmail}</label>
+              <input
+                id="sign-in-code"
+                value={otpCode}
+                onChange={(event) => setOtpCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                pattern="[0-9]{6}"
+                maxLength={6}
+              />
+              <button className="pairing-primary" type="submit" disabled={authBusy || otpCode.length !== 6}>
+                {authBusy ? "Connecting…" : "Verify and connect"}
+              </button>
+              <button className="pairing-link" type="button" disabled={authBusy} onClick={() => void requestCode(account)}>
+                Send a new code
+              </button>
+            </form>
+          ) : (
+            <button className="pairing-primary" type="button" disabled={authBusy} onClick={() => void requestCode(account)}>
+              {authBusy ? "Sending code…" : "Email me a sign-in code"}
+            </button>
+          )}
+          {authError && <div className="pairing-error" role="alert">{authError}</div>}
           <button className="pairing-link" type="button" onClick={onExploreDemo}>Explore the preview instead</button>
-          <p className="pairing-fine-print">Sign-in opens Nimbalyst&apos;s existing secure account service.</p>
+          <p className="pairing-fine-print">No redirect. The one-time code expires after 10 minutes.</p>
         </section>
       </main>
     );
