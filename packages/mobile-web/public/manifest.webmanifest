@@ -1,0 +1,20 @@
+{
+  "name": "Nimbalyst",
+  "short_name": "Nimbalyst",
+  "description": "Your personal AI development command center.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0b0d",
+  "theme_color": "#0b0b0d",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/nimbalyst-icon.png",
+      "sizes": "800x800",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
