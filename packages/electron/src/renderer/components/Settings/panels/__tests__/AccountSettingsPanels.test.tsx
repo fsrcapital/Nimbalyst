@@ -21,6 +21,7 @@ import {
   AccountSettingsPanel,
   AccountSharedLinksSettingsPanel,
   MobileAppSettingsPanel,
+  WebAppSettingsPanel,
 } from '../AccountSettingsPanel';
 import {
   getSettingsRoutesForScope,
@@ -48,6 +49,13 @@ describe('Account settings panels', () => {
     expect(screen.getByTestId('sync-panel').getAttribute('data-section')).toBe('mobile');
   });
 
+  it('renders only the web section for the Web App route', () => {
+    render(<WebAppSettingsPanel />);
+
+    expect(screen.getAllByTestId('sync-panel')).toHaveLength(1);
+    expect(screen.getByTestId('sync-panel').getAttribute('data-section')).toBe('web');
+  });
+
   it('renders only the devices section for the Devices route', () => {
     render(<AccountDevicesSettingsPanel />);
 
@@ -64,12 +72,13 @@ describe('Account settings panels', () => {
 });
 
 describe('Account settings routes', () => {
-  it('lists Accounts, Mobile App, Devices and Shared Links as separate nav items', () => {
+  it('lists native mobile and web pairing as separate account routes', () => {
     const routes = getSettingsRoutesForScope('account', context);
 
     expect(routes.map((route) => [route.id, route.label])).toEqual([
       ['account', 'Accounts'],
       ['account-mobile', 'Mobile App'],
+      ['account-web', 'Web App'],
       ['account-devices', 'Devices'],
       ['account-shared-links', 'Shared Links'],
     ]);

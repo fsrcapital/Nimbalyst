@@ -1671,8 +1671,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   credentials: {
     get: () => ipcRenderer.invoke('credentials:get'),
     reset: () => ipcRenderer.invoke('credentials:reset'),
-    generateQRPayload: (serverUrl: string) =>
-      ipcRenderer.invoke('credentials:generate-qr-payload', serverUrl),
+    generateQRPayload: (serverUrl: string, pairingTarget: 'ios' | 'web') =>
+      ipcRenderer.invoke('credentials:generate-qr-payload', serverUrl, pairingTarget),
     isSecure: () => ipcRenderer.invoke('credentials:is-secure'),
   },
 

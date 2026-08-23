@@ -9,7 +9,8 @@
  * Security notes:
  * - Encryption key seed is generated locally and NEVER sent to the server
  * - The key seed is only shared via QR code for mobile pairing
- * - Authentication is handled separately by StytchAuthService
+ * - Remote gateway access is authenticated by a domain-separated token derived
+ *   from the same device-pairing seed
  */
 
 import { safeStorage } from 'electron';
@@ -218,6 +219,12 @@ export function generateQRPairingPayload(
   syncEmail?: string,
   personalOrgId?: string,
   personalUserId?: string,
+  remoteGateway?: {
+    port: number;
+    token: string;
+    pwaUrl: string;
+    workspaces: Array<{ path: string; name: string }>;
+  },
 ): {
   version: number;
   serverUrl: string;
@@ -227,6 +234,12 @@ export function generateQRPairingPayload(
   syncEmail?: string;
   personalOrgId?: string;
   personalUserId?: string;
+  remoteGateway?: {
+    port: number;
+    token: string;
+    pwaUrl: string;
+    workspaces: Array<{ path: string; name: string }>;
+  };
 } {
   const credentials = getCredentials();
 
@@ -237,7 +250,7 @@ export function generateQRPairingPayload(
   const analyticsId = AnalyticsService.getInstance().getDistinctId();
 
   return {
-    version: 5, // Version 5 = includes personalOrgId/personalUserId for room routing
+    version: remoteGateway ? 6 : 5,
     serverUrl,
     encryptionKeySeed: credentials.encryptionKeySeed,
     expiresAt,
@@ -245,5 +258,6 @@ export function generateQRPairingPayload(
     syncEmail,
     personalOrgId,
     personalUserId,
+    remoteGateway,
   };
 }

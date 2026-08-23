@@ -27,16 +27,6 @@ export async function generateMetadata(): Promise<Metadata> {
     title,
     description,
     applicationName: "Nimbalyst",
-    manifest: "/manifest.webmanifest",
-    icons: {
-      icon: "/nimbalyst-icon.png",
-      apple: "/nimbalyst-icon.png",
-    },
-    appleWebApp: {
-      capable: true,
-      statusBarStyle: "black-translucent",
-      title: "Nimbalyst",
-    },
     openGraph: {
       title,
       description,
@@ -67,6 +57,15 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        <link rel="manifest" href="/manifest.webmanifest" />
+        <link rel="icon" href="/nimbalyst-icon.png" />
+        <link rel="apple-touch-icon" href="/nimbalyst-icon.png" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-title" content="Nimbalyst" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+      </head>
       <body className={`${geistSans.variable} ${geistMono.variable}`}>
         <PwaRegistration />
         {children}

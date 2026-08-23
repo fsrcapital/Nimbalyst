@@ -75,6 +75,19 @@ function buildWorkflowListFields(metadata: Record<string, any>): Pick<
   };
 }
 
+function countActiveSubagents(metadata: Record<string, any>): number {
+  const activeTasks = Array.isArray(metadata.currentTasks)
+    ? metadata.currentTasks.filter((task: any) => task?.status === 'running').length
+    : 0;
+  const activeTeammates = Array.isArray(metadata.currentTeammates)
+    ? metadata.currentTeammates.filter((teammate: any) => teammate?.status === 'running').length
+    : 0;
+
+  // Claude task telemetry and agent-team metadata can describe the same
+  // delegated work. Taking the larger channel avoids inflating the count.
+  return Math.max(activeTasks, activeTeammates);
+}
+
 /**
  * Parse a TEXT column that's supposed to hold JSON back into the value the
  * runtime expects. Under PGLite (JSONB) reads return parsed values directly,
@@ -758,6 +771,7 @@ export function createPGLiteSessionStore(db: PGliteLike, ensureDbReady?: EnsureR
           // Replaces the legacy `metadata.pendingAskUserQuestion` flag,
           // which nothing was writing.
           hasPendingInteractivePrompt: !!metadata.hasPendingPrompt,
+          activeSubagentCount: countActiveSubagents(metadata),
           // Kanban board phase and tags from metadata JSONB
           phase: metadata.phase ?? undefined,
           tags: Array.isArray(metadata.tags) ? metadata.tags : undefined,
@@ -1014,6 +1028,8 @@ export function createPGLiteSessionStore(db: PGliteLike, ensureDbReady?: EnsureR
           branchedFromSessionId: row.branched_from_session_id ?? undefined,
           branchPointMessageId: row.branch_point_message_id ? parseInt(row.branch_point_message_id) : undefined,
           branchedAt,
+          hasPendingInteractivePrompt: !!metadata.hasPendingPrompt,
+          activeSubagentCount: countActiveSubagents(metadata),
           ...buildWorkflowListFields(metadata),
         } satisfies SessionMeta;
       });

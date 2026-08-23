@@ -8,6 +8,15 @@ export type PairingPayload = {
   userId: string;
   personalOrgId?: string;
   personalUserId?: string;
+  remoteGateway?: RemoteGatewayPairing;
+};
+
+export type RemoteGatewayPairing = {
+  port: number;
+  token: string;
+  pwaUrl: string;
+  workspaces: Array<{ path: string; name: string }>;
+  url?: string;
 };
 
 export type PairingAccount = Omit<PairingPayload, "encryptionKeySeed"> & {
@@ -24,6 +33,48 @@ function requiredString(value: unknown, label: string): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function parseRemoteGateway(value: unknown): RemoteGatewayPairing | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("The desktop gateway details are invalid.");
+  }
+  const raw = value as Record<string, unknown>;
+  const port = raw.port;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("The desktop gateway port is invalid.");
+  }
+  const token = requiredString(raw.token, "Desktop gateway credential");
+  if (!/^[a-f0-9]{64}$/i.test(token)) {
+    throw new Error("The desktop gateway credential is invalid.");
+  }
+  const pwaUrl = requiredString(raw.pwaUrl, "Command Center address");
+  let parsedPwaUrl: URL;
+  try {
+    parsedPwaUrl = new URL(pwaUrl);
+  } catch {
+    throw new Error("The Command Center address is invalid.");
+  }
+  if (parsedPwaUrl.protocol !== "https:" && parsedPwaUrl.hostname !== "localhost") {
+    throw new Error("The Command Center address must be encrypted.");
+  }
+  const workspaces = Array.isArray(raw.workspaces)
+    ? raw.workspaces.flatMap((workspace) => {
+        if (!workspace || typeof workspace !== "object" || Array.isArray(workspace)) return [];
+        const entry = workspace as Record<string, unknown>;
+        const path = optionalString(entry.path);
+        const name = optionalString(entry.name);
+        return path && name ? [{ path, name }] : [];
+      })
+    : [];
+  return {
+    port,
+    token: token.toLowerCase(),
+    pwaUrl: parsedPwaUrl.toString().replace(/\/$/, ""),
+    workspaces,
+    url: optionalString(raw.url),
+  };
 }
 
 function decodeBase64(value: string): string {
@@ -104,6 +155,7 @@ export function parsePairingPayload(input: string, now = Date.now()): PairingPay
     userId,
     personalOrgId: optionalString(raw.personalOrgId),
     personalUserId: optionalString(raw.personalUserId),
+    remoteGateway: parseRemoteGateway(raw.remoteGateway),
   };
 }
 
@@ -117,6 +169,7 @@ export function accountFromPayload(payload: PairingPayload, pairedAt = Date.now(
     userId: payload.userId,
     personalOrgId: payload.personalOrgId,
     personalUserId: payload.personalUserId,
+    remoteGateway: payload.remoteGateway,
     keySalt: payload.personalUserId ?? payload.userId,
     pairedAt,
   };

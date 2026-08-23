@@ -1,6 +1,22 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest';
-import { formatTurnFinishedAt } from '../dateUtils';
+import { formatMessageTime, formatTurnFinishedAt } from '../dateUtils';
+
+describe('formatMessageTime', () => {
+  it('always shows the calendar date and time for long-running session transcripts', () => {
+    const messageCreatedAt = new Date(2026, 7, 23, 17, 42, 0);
+
+    expect(formatMessageTime(messageCreatedAt)).toBe(
+      messageCreatedAt.toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      }),
+    );
+  });
+});
 
 describe('formatTurnFinishedAt', () => {
   it('shows only the time for turns that ended earlier today', () => {

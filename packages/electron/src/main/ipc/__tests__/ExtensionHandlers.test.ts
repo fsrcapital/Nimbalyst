@@ -1,6 +1,16 @@
 import * as path from 'path';
 import { describe, expect, it } from 'vitest';
+import { parseClaudeCliInstalledPluginsJson } from '../claudeCliInstalledPlugins';
 import { buildExtensionFindFilesPlan } from '../extensionFindFilesPlan';
+
+describe('parseClaudeCliInstalledPluginsJson', () => {
+  it('accepts the UTF-8 BOM emitted by Windows tooling', () => {
+    expect(parseClaudeCliInstalledPluginsJson('\uFEFF{"version":2,"plugins":{}}')).toEqual({
+      version: 2,
+      plugins: {},
+    });
+  });
+});
 
 describe('buildExtensionFindFilesPlan', () => {
   const workspacePath = path.resolve('/tmp/workspace');

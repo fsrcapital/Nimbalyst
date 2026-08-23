@@ -3,26 +3,26 @@
 
 import { useEffect, useRef, useState } from "react";
 import { deriveEncryptionKey } from "../lib/crypto";
-import { accountFromPayload, parsePairingPayload, type PairingAccount } from "../lib/pairing";
-import { saveAuthSession, saveStoredPairing, type StoredPairing } from "../lib/pairingStore";
-import { completePairingWithCode, sendPairingCode, signInErrorMessage } from "../lib/stytchAuth";
+import { accountFromPayload, parsePairingPayload } from "../lib/pairing";
+import { checkGateway, normalizeGatewayUrl } from "../lib/gateway";
+import { clearStoredPairing, saveStoredPairing, type StoredPairing } from "../lib/pairingStore";
 
 type PairingPanelProps = {
   pairing?: StoredPairing;
   onPaired: (pairing: StoredPairing) => void;
   onExploreDemo: () => void;
+  onReset: () => void;
 };
 
-export default function PairingPanel({ pairing, onPaired, onExploreDemo }: PairingPanelProps) {
+export default function PairingPanel({ pairing, onPaired, onExploreDemo, onReset }: PairingPanelProps) {
   const [scanning, setScanning] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualValue, setManualValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
-  const [otpCode, setOtpCode] = useState("");
-  const [authBusy, setAuthBusy] = useState(false);
-  const [authError, setAuthError] = useState("");
+  const [gatewayUrl, setGatewayUrl] = useState(pairing?.account.remoteGateway?.url ?? "");
+  const [gatewayBusy, setGatewayBusy] = useState(false);
+  const [gatewayError, setGatewayError] = useState("");
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const acceptPayload = async (value: string) => {
@@ -43,30 +43,26 @@ export default function PairingPanel({ pairing, onPaired, onExploreDemo }: Pairi
     }
   };
 
-  const requestCode = async (account: PairingAccount) => {
-    setAuthBusy(true);
-    setAuthError("");
+  const connectGateway = async () => {
+    if (!pairing?.account.remoteGateway) return;
+    setGatewayBusy(true);
+    setGatewayError("");
     try {
-      await sendPairingCode(account);
-      setOtpSent(true);
-    } catch (caught) {
-      setAuthError(signInErrorMessage(caught));
-    } finally {
-      setAuthBusy(false);
-    }
-  };
-
-  const verifyCode = async (account: PairingAccount) => {
-    setAuthBusy(true);
-    setAuthError("");
-    try {
-      const auth = await completePairingWithCode(account, otpCode);
-      const updated = await saveAuthSession(auth);
+      const url = normalizeGatewayUrl(gatewayUrl);
+      const updated: StoredPairing = {
+        ...pairing,
+        account: {
+          ...pairing.account,
+          remoteGateway: { ...pairing.account.remoteGateway, url },
+        },
+      };
+      await checkGateway(updated.account);
+      await saveStoredPairing(updated);
       onPaired(updated);
     } catch (caught) {
-      setAuthError(signInErrorMessage(caught));
+      setGatewayError(caught instanceof Error ? caught.message : "Could not connect to the desktop gateway.");
     } finally {
-      setAuthBusy(false);
+      setGatewayBusy(false);
     }
   };
 
@@ -104,7 +100,8 @@ export default function PairingPanel({ pairing, onPaired, onExploreDemo }: Pairi
   }, [scanning]);
 
   if (pairing) {
-    const account: PairingAccount = pairing.account;
+    const account = pairing.account;
+    const gateway = account.remoteGateway;
     return (
       <main className="pairing-shell">
         <section className="pairing-card pairing-success-card">
@@ -112,46 +109,44 @@ export default function PairingPanel({ pairing, onPaired, onExploreDemo }: Pairi
             <img src="/nimbalyst-icon.png" width={34} height={34} alt="" />
             <span>Nimbalyst</span>
           </div>
-          <span className="pairing-kicker">DESKTOP FOUND</span>
-          <h1>One secure sign-in away.</h1>
+          <span className="pairing-kicker">Desktop Found</span>
+          <h1>{gateway ? "Connect Through Your Private Network." : "Generate a New Desktop Code."}</h1>
           <p>
-            The encryption key for <strong>{account.syncEmail ?? "your personal workspace"}</strong> is stored on this device.
-            Sign in with the same Nimbalyst account to load its sessions.
+            {gateway
+              ? <>The private gateway credential for <strong>{account.syncEmail ?? "your desktop"}</strong> is stored on this device. Enter the HTTPS address Tailscale gives this computer.</>
+              : <>This older pairing code does not contain a desktop gateway credential. Rebuild and restart Nimbalyst, then scan a new QR code.</>}
           </p>
           <div className="pairing-security-note">
             <span aria-hidden="true">◇</span>
             <div>
-              <strong>End-to-end encryption preserved</strong>
-              <small>The raw desktop key was discarded and never sent to this website.</small>
+              <strong>End-to-End Encryption Preserved</strong>
+              <small>The credential stays on this device and the desktop remains private to your Tailscale network.</small>
             </div>
           </div>
-          {otpSent ? (
-            <form className="otp-sign-in" onSubmit={(event) => { event.preventDefault(); void verifyCode(account); }}>
-              <label htmlFor="sign-in-code">Enter the 6-digit code sent to {account.syncEmail}</label>
+          {gateway && (
+            <form className="otp-sign-in" onSubmit={(event) => { event.preventDefault(); void connectGateway(); }}>
+              <label htmlFor="gateway-url">Private Desktop Address</label>
               <input
-                id="sign-in-code"
-                value={otpCode}
-                onChange={(event) => setOtpCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                pattern="[0-9]{6}"
-                maxLength={6}
+                id="gateway-url"
+                value={gatewayUrl}
+                onChange={(event) => setGatewayUrl(event.target.value)}
+                inputMode="url"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder="https://your-pc.your-tailnet.ts.net"
               />
-              <button className="pairing-primary" type="submit" disabled={authBusy || otpCode.length !== 6}>
-                {authBusy ? "Connecting…" : "Verify and connect"}
-              </button>
-              <button className="pairing-link" type="button" disabled={authBusy} onClick={() => void requestCode(account)}>
-                Send a new code
+              <button className="pairing-primary" type="submit" disabled={gatewayBusy || !gatewayUrl.trim()}>
+                {gatewayBusy ? "Connecting…" : "Connect to Desktop"}
               </button>
             </form>
-          ) : (
-            <button className="pairing-primary" type="button" disabled={authBusy} onClick={() => void requestCode(account)}>
-              {authBusy ? "Sending code…" : "Email me a sign-in code"}
-            </button>
           )}
-          {authError && <div className="pairing-error" role="alert">{authError}</div>}
-          <button className="pairing-link" type="button" onClick={onExploreDemo}>Explore the preview instead</button>
-          <p className="pairing-fine-print">No redirect. The one-time code expires after 10 minutes.</p>
+          {gatewayError && <div className="pairing-error" role="alert">{gatewayError}</div>}
+          <button className="pairing-secondary" type="button" onClick={() => void clearStoredPairing().then(onReset)}>
+            Scan a New Desktop Code
+          </button>
+          <button className="pairing-link" type="button" onClick={onExploreDemo}>Explore the Preview Instead</button>
+          <p className="pairing-fine-print">No Nimbalyst account or upstream approval is required.</p>
         </section>
       </main>
     );
@@ -164,31 +159,31 @@ export default function PairingPanel({ pairing, onPaired, onExploreDemo }: Pairi
           <img src="/nimbalyst-icon.png" width={34} height={34} alt="" />
           <span>Nimbalyst</span>
         </div>
-        <span className="pairing-kicker">COMMAND CENTER</span>
-        <h1>Bring your desktop sessions with you.</h1>
-        <p>Open Nimbalyst on your computer, then go to <strong>Settings → Mobile App → Pair a device</strong>.</p>
+        <span className="pairing-kicker">Command Center</span>
+        <h1>Bring Your Desktop Sessions with You.</h1>
+        <p>Open Nimbalyst on your computer, then go to <strong>Settings → Web App → Pair a Device</strong>.</p>
 
         {scanning ? (
           <div className="scanner-panel">
             <video ref={videoRef} muted playsInline aria-label="QR code camera preview" />
             <div className="scanner-frame" aria-hidden="true" />
             <span>Point this device at the QR code on your desktop.</span>
-            <button className="pairing-secondary" type="button" onClick={() => setScanning(false)}>Cancel camera</button>
+            <button className="pairing-secondary" type="button" onClick={() => setScanning(false)}>Cancel Camera</button>
           </div>
         ) : (
           <div className="pairing-actions">
             <button className="pairing-primary" type="button" onClick={() => { setError(""); setScanning(true); }}>
-              <span aria-hidden="true">▣</span> Scan desktop QR code
+              <span aria-hidden="true">▣</span> Scan Desktop QR Code
             </button>
             <button className="pairing-secondary" type="button" onClick={() => setManualOpen((open) => !open)}>
-              Paste pairing payload
+              Paste Pairing Payload
             </button>
           </div>
         )}
 
         {manualOpen && !scanning && (
           <form className="manual-pairing" onSubmit={(event) => { event.preventDefault(); void acceptPayload(manualValue); }}>
-            <label htmlFor="pairing-payload">Pairing payload</label>
+            <label htmlFor="pairing-payload">Pairing Payload</label>
             <textarea
               id="pairing-payload"
               rows={5}
@@ -200,7 +195,7 @@ export default function PairingPanel({ pairing, onPaired, onExploreDemo }: Pairi
               spellCheck={false}
             />
             <button className="pairing-primary" type="submit" disabled={busy || !manualValue.trim()}>
-              {busy ? "Securing this device…" : "Pair this device"}
+              {busy ? "Securing this device…" : "Pair This Device"}
             </button>
           </form>
         )}
@@ -208,8 +203,8 @@ export default function PairingPanel({ pairing, onPaired, onExploreDemo }: Pairi
         {error && <div className="pairing-error" role="alert">{error}</div>}
 
         <div className="pairing-divider"><span>or</span></div>
-        <button className="pairing-link" type="button" onClick={onExploreDemo}>Explore with preview sessions</button>
-        <p className="pairing-fine-print">The QR contains an encryption key, never your login token. It expires after 15 minutes.</p>
+        <button className="pairing-link" type="button" onClick={onExploreDemo}>Explore with Preview Sessions</button>
+        <p className="pairing-fine-print">The QR contains an encryption key and a private desktop credential. It expires after 15 minutes.</p>
       </section>
     </main>
   );

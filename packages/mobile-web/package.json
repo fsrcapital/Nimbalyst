@@ -14,7 +14,6 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
-    "@stytch/vanilla-js": "^6.2.0",
     "@zxing/browser": "^0.2.1",
     "drizzle-orm": "0.45.2",
     "react": "19.2.6",

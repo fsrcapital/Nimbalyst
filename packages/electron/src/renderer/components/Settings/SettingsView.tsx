@@ -66,6 +66,7 @@ import {
   AccountSettingsPanel,
   AccountSharedLinksSettingsPanel,
   MobileAppSettingsPanel,
+  WebAppSettingsPanel,
 } from './panels/AccountSettingsPanel';
 import { ProjectSharingPanel, type ProjectSettingsTarget } from './panels/ProjectSharingPanel';
 import { ProjectAIProvidersPanel } from './panels/ProjectAIProvidersPanel';
@@ -946,6 +947,8 @@ export function SettingsView({
       case 'personal-mobile':
       case 'sync':
         return <MobileAppSettingsPanel />;
+      case 'account-web':
+        return <WebAppSettingsPanel />;
       case 'account-devices':
       case 'personal-devices':
         return <AccountDevicesSettingsPanel />;

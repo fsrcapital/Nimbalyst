@@ -921,6 +921,26 @@ export const sessionCurrentTeammatesAtom = atomFamily((sessionId: string) =>
   })
 );
 
+/**
+ * Number of delegated agents currently executing for a session.
+ *
+ * Loaded session metadata is the live source. The registry value is the
+ * persisted fallback for sessions that are not open in a tab.
+ */
+export const sessionActiveSubagentCountAtom = atomFamily((sessionId: string) =>
+  atom((get) => {
+    const metadata = get(sessionStoreAtom(sessionId))?.metadata;
+    const activeTasks = Array.isArray(metadata?.currentTasks)
+      ? metadata.currentTasks.filter((task: any) => task?.status === 'running').length
+      : 0;
+    const activeTeammates = Array.isArray(metadata?.currentTeammates)
+      ? metadata.currentTeammates.filter((teammate: any) => teammate?.status === 'running').length
+      : 0;
+    const liveCount = Math.max(activeTasks, activeTeammates);
+    return liveCount || get(sessionRegistryAtom).get(sessionId)?.activeSubagentCount || 0;
+  })
+);
+
 export const sessionCurrentTodosAtom = atomFamily((sessionId: string) =>
   atom((get) => {
     const raw = get(sessionStoreAtom(sessionId))?.metadata?.currentTodos;

@@ -32,20 +32,15 @@ test("server-renders the secure desktop pairing entry point", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>Nimbalyst — AI development command center<\/title>/i);
-  assert.match(html, /Bring your desktop sessions with you/);
-  assert.match(html, /Scan desktop QR code/);
-  assert.match(html, /Paste pairing payload/);
-  assert.match(html, /Explore with preview sessions/);
-  assert.match(html, /manifest\.webmanifest/);
+  assert.match(html, /Bring Your Desktop Sessions with You/);
+  assert.match(html, /Scan Desktop QR Code/);
+  assert.match(html, /Paste Pairing Payload/);
+  assert.match(html, /Explore with Preview Sessions/);
+  assert.match(
+    html,
+    /<head>[\s\S]*<link rel="manifest" href="\/manifest\.webmanifest"\/?>(?:[\s\S]*?)<\/head>/i,
+  );
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/);
-});
-
-test("never caches the credential-bearing sign-in callback", async () => {
-  const response = await render("/pair/callback?session_token=secret");
-  assert.equal(response.status, 302);
-  assert.match(response.headers.get("cache-control") ?? "", /no-store/);
-  assert.match(response.headers.get("location") ?? "", /^\/pair\/callback#session_token=secret$/);
-  assert.equal(await response.text(), "");
 });
 
 test("ships an installable standalone web app shell", async () => {
@@ -60,10 +55,16 @@ test("ships an installable standalone web app shell", async () => {
   assert.equal(manifest.display, "standalone");
   assert.equal(manifest.start_url, "/");
   assert.equal(manifest.theme_color, "#0b0b0d");
-  assert.ok(manifest.icons.some((icon) => icon.purpose.includes("maskable")));
-  assert.match(serviceWorker, /nimbalyst-mobile-v2/);
+  assert.ok(manifest.icons.some((icon) => icon.sizes === "192x192"));
+  assert.ok(manifest.icons.some((icon) => icon.sizes === "512x512"));
+  assert.ok(manifest.icons.some((icon) => icon.purpose === "any"));
+  assert.ok(manifest.icons.some((icon) => icon.purpose === "maskable"));
+  assert.match(serviceWorker, /nimbalyst-mobile-v8/);
   assert.match(serviceWorker, /caches\.open/);
   assert.match(serviceWorker, /session_token/);
   assert.match(serviceWorker, /sensitiveRoute \|\| sensitiveQuery/);
+  assert.match(serviceWorker, /addEventListener\("push"/);
+  assert.match(serviceWorker, /showNotification/);
+  assert.match(serviceWorker, /addEventListener\("notificationclick"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton|site-creator-vinext-starter/);
 });

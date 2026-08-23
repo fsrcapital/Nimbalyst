@@ -16,8 +16,10 @@ import { logger } from '../utils/logger';
 export type PreventSleepMode = 'off' | 'always' | 'pluggedIn';
 
 let blockerId: number | null = null;
-let currentMode: PreventSleepMode = 'off';
+let syncMode: PreventSleepMode = 'off';
 let syncConnected = false;
+let webAppMode: PreventSleepMode = 'off';
+let webAppEnabled = false;
 let batteryListenersRegistered = false;
 
 /**
@@ -25,7 +27,7 @@ let batteryListenersRegistered = false;
  * Call this when the user changes the setting or when sync connects/disconnects.
  */
 export function setSleepPreventionMode(mode: PreventSleepMode): void {
-  currentMode = mode;
+  syncMode = mode;
   registerBatteryListeners();
   reconcile();
 }
@@ -35,6 +37,14 @@ export function setSleepPreventionMode(mode: PreventSleepMode): void {
  */
 export function setSyncConnected(connected: boolean): void {
   syncConnected = connected;
+  reconcile();
+}
+
+/** Configure sleep prevention for the direct Web App gateway. */
+export function setWebAppSleepPrevention(enabled: boolean, mode: PreventSleepMode): void {
+  webAppEnabled = enabled;
+  webAppMode = mode;
+  registerBatteryListeners();
   reconcile();
 }
 
@@ -49,7 +59,7 @@ export function isPreventingSleep(): boolean {
  * Returns the current sleep prevention mode.
  */
 export function getSleepPreventionMode(): PreventSleepMode {
-  return currentMode;
+  return syncMode;
 }
 
 /**
@@ -57,8 +67,10 @@ export function getSleepPreventionMode(): PreventSleepMode {
  */
 export function shutdownSleepPrevention(): void {
   stopBlocker();
-  currentMode = 'off';
+  syncMode = 'off';
   syncConnected = false;
+  webAppMode = 'off';
+  webAppEnabled = false;
 }
 
 // -- Legacy API for backward compat during migration --
@@ -76,13 +88,27 @@ export function stopPreventingSleep(): void {
 // -- Internal --
 
 function shouldBeBlocking(): boolean {
-  if (!syncConnected) return false;
-  if (currentMode === 'off') return false;
-  if (currentMode === 'always') return true;
-  if (currentMode === 'pluggedIn') {
-    return !powerMonitor.isOnBatteryPower();
-  }
-  return false;
+  return shouldPreventSleep({
+    syncConnected,
+    syncMode,
+    webAppEnabled,
+    webAppMode,
+    onBattery: powerMonitor.isOnBatteryPower(),
+  });
+}
+
+export function shouldPreventSleep(state: {
+  syncConnected: boolean;
+  syncMode: PreventSleepMode;
+  webAppEnabled: boolean;
+  webAppMode: PreventSleepMode;
+  onBattery: boolean;
+}): boolean {
+  const sourceBlocks = (active: boolean, mode: PreventSleepMode) => active && (
+    mode === 'always' || (mode === 'pluggedIn' && !state.onBattery)
+  );
+  return sourceBlocks(state.syncConnected, state.syncMode)
+    || sourceBlocks(state.webAppEnabled, state.webAppMode);
 }
 
 function reconcile(): void {
@@ -101,7 +127,7 @@ function startBlocker(): void {
     return;
   }
   blockerId = powerSaveBlocker.start('prevent-app-suspension');
-  logger.main.info(`(POWER) Started sleep prevention (blocker id: ${blockerId}, mode: ${currentMode})`);
+  logger.main.info(`(POWER) Started sleep prevention (blocker id: ${blockerId})`);
 }
 
 function stopBlocker(): void {

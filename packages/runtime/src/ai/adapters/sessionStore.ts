@@ -37,6 +37,8 @@ export interface SessionMeta {
    * session list refresh so a stale in-memory atom gets corrected.
    */
   hasPendingInteractivePrompt?: boolean;
+  /** Number of delegated agents currently running, derived from persisted provider metadata. */
+  activeSubagentCount?: number;
   // Kanban board phase and tags (from metadata JSONB)
   phase?: string;
   tags?: string[];

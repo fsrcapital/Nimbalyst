@@ -237,10 +237,6 @@ const PromptAdditionsInline: React.FC<{
     return null;
   }
 
-  const formatTimestamp = (ts: number) => {
-    return new Date(ts).toLocaleTimeString();
-  };
-
   // Helper to render an expandable section
   const renderExpandableSection = (
     title: string,
@@ -295,7 +291,7 @@ const PromptAdditionsInline: React.FC<{
         </span>
         <span className="text-[var(--nim-text-muted)]">Prompt Additions</span>
         <span className="ml-auto text-[11px] text-[var(--nim-text-faint)]">
-          {formatTimestamp(timestamp)}
+          {formatMessageTime(timestamp)}
         </span>
       </div>
 
@@ -2321,6 +2317,11 @@ export const RichTranscriptView = React.forwardRef<
                 </button>
               )}
             </div>
+          </div>
+        )}
+        {!isNewGroup && (
+          <div className="rich-transcript-message-time mb-1 text-right text-[10px] text-[var(--nim-text-faint)]">
+            {formatMessageTime(message.createdAt?.getTime() ?? 0)}
           </div>
         )}
 

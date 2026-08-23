@@ -7,6 +7,7 @@ import * as os from 'os';
 import https from 'https';
 import { spawn } from 'child_process';
 import { resolveClaudeConfigDir } from '@nimbalyst/runtime/ai/server/providers/claudeCode/claudeConfigDir';
+import { parseClaudeCliInstalledPluginsJson } from './claudeCliInstalledPlugins';
 
 // Marketplace data cache
 let marketplaceCache: MarketplaceData | null = null;
@@ -246,7 +247,7 @@ async function readInstalledPluginsJson(): Promise<InstalledPluginsJson> {
   const jsonPath = getInstalledPluginsJsonPath();
   try {
     const content = await fsPromises.readFile(jsonPath, 'utf-8');
-    return JSON.parse(content);
+    return parseClaudeCliInstalledPluginsJson(content);
   } catch {
     // File doesn't exist or is invalid, return empty structure
     return { version: INSTALLED_PLUGINS_VERSION, plugins: {} };

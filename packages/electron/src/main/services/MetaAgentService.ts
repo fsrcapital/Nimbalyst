@@ -23,6 +23,13 @@ import { extractMessageText, extractUserPrompts } from './metaAgentMessageText';
 import type { NotificationOptions, NotificationResult } from './NotificationService';
 import type { MobilePushResult } from '@nimbalyst/runtime/sync/types';
 import { composeNotificationTitle } from '../../shared/notificationTitle';
+import { findPendingInteractivePromptFromRows } from './pendingInteractivePromptRows';
+import { getLiveRemoteInteractivePrompt } from '../mcp/tools/interactivePromptLiveness';
+import {
+  resolveRemoteSessionCreation,
+  type RemoteSessionCreationInput,
+  type RemoteSessionCreationOptions,
+} from './remoteSessionCreation';
 
 type SessionStatusValue = 'idle' | 'running' | 'waiting_for_input' | 'error' | 'interrupted';
 type PromptType = 'permission_request' | 'ask_user_question_request' | 'exit_plan_mode_request';
@@ -324,6 +331,95 @@ export class MetaAgentService {
     // process-lifetime singletons.
     this.serverPort = null;
     this.started = false;
+  }
+
+  public async listRemoteSessionCreationOptions(
+    workspaceId: string,
+  ): Promise<RemoteSessionCreationOptions> {
+    if (!this.aiService) throw new Error('AI service not initialized');
+    return this.aiService.listRemoteAgentModels(workspaceId);
+  }
+
+  public async createRemoteSession(
+    workspaceId: string,
+    input: RemoteSessionCreationInput,
+  ): Promise<{
+    sessionId: string;
+    title: string;
+    provider: string;
+    model: string;
+    worktreeId: string | null;
+    worktreePath: string | null;
+  }> {
+    if (!this.aiService) throw new Error('AI service not initialized');
+    const options = await this.listRemoteSessionCreationOptions(workspaceId);
+    const resolved = resolveRemoteSessionCreation(options, input);
+
+    let worktreeId: string | null = null;
+    let worktreePath: string | null = null;
+    if (resolved.useWorktree) {
+      const db = getDatabase();
+      if (!db) throw new Error('Database not initialized');
+      const worktreeStore = createWorktreeStore(db);
+      const gitWorktreeService = new GitWorktreeService();
+      const [dbNames, filesystemNames, branchNames] = await Promise.all([
+        worktreeStore.getAllNames(),
+        Promise.resolve(gitWorktreeService.getExistingWorktreeDirectories(workspaceId)),
+        gitWorktreeService.getAllBranchNames(workspaceId),
+      ]);
+      const existingNames = new Set([...dbNames, ...filesystemNames, ...branchNames]);
+      const finalName = gitWorktreeService.generateUniqueWorktreeName(existingNames);
+      const worktree = await gitWorktreeService.createWorktree(workspaceId, { name: finalName });
+      await worktreeStore.create(worktree);
+      gitRefWatcher.start(worktree.path).catch((error: Error) => {
+        console.error('[MetaAgentService] Failed to start GitRefWatcher for remote worktree:', error);
+      });
+      worktreeId = worktree.id;
+      worktreePath = worktree.path;
+    }
+
+    const sessionId = randomUUID();
+    await AISessionsRepository.create({
+      id: sessionId,
+      provider: resolved.provider,
+      model: resolved.model,
+      title: resolved.title,
+      workspaceId,
+      worktreeId: worktreeId ?? undefined,
+      agentRole: 'standard',
+      hasBeenNamed: !!input.title?.trim(),
+    } as any);
+
+    const promptProvenance: PromptProvenance = {
+      actor: 'human',
+      origin: 'mobile',
+    };
+    await this.aiService.queuePromptForSession(sessionId, resolved.prompt, undefined, {
+      promptProvenance,
+    });
+
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed()) continue;
+      window.webContents.send('sessions:refresh-list', { workspacePath: workspaceId, sessionId });
+      if (worktreeId) {
+        window.webContents.send('worktree:session-created', { sessionId, worktreeId });
+      }
+    }
+
+    await this.aiService.triggerQueuedPromptProcessingForSession(
+      sessionId,
+      worktreePath || workspaceId,
+      'mobile-control',
+    );
+
+    return {
+      sessionId,
+      title: resolved.title,
+      provider: resolved.provider,
+      model: resolved.model,
+      worktreeId,
+      worktreePath,
+    };
   }
 
   /**
@@ -1452,10 +1548,47 @@ export class MetaAgentService {
   }
 
   private async getPendingInteractivePrompt(sessionId: string): Promise<PendingInteractivePrompt | null> {
-    // Interactive prompts are persisted in three different formats:
-    // 1. AskUserQuestion:  { type: "nimbalyst_tool_use", name: "AskUserQuestion", id: "...", input: { questions } }
+    // Codex may call Nimbalyst's MCP server from inside its `exec` meta-tool.
+    // In that path the transcript does not contain the nested AskUserQuestion
+    // until after the MCP call finishes, so expose the handler's live projection
+    // while it is blocked. Durable transcript reconstruction remains the
+    // restart-safe fallback for providers that persist the request up front.
+    const livePrompt = getLiveRemoteInteractivePrompt(sessionId);
+    if (livePrompt) return livePrompt;
+
+    // Interactive prompts are persisted in several provider-specific formats:
+    // 1. AskUserQuestion:  a Claude assistant message containing an MCP tool_use,
+    //    or the legacy { type: "nimbalyst_tool_use", name: "AskUserQuestion", ... } row
     // 2. ToolPermission:   { type: "nimbalyst_tool_use", name: "ToolPermission", id: "...", input: { requestId, toolName, ... } }
     // 3. ExitPlanMode:     { type: "exit_plan_mode_request", status: "pending", requestId: "..." }
+    const { rows: askUserQuestionRows } = await databaseWorker.query<{
+      id: string;
+      content: string;
+      created_at: Date;
+    }>(
+      `SELECT id, content, created_at
+       FROM ai_agent_messages
+       WHERE session_id = $1
+         AND (hidden = FALSE OR hidden IS NULL)
+         AND (
+           content LIKE '%AskUserQuestion%'
+           OR content LIKE '%"type":"ask_user_question_response"%'
+         )
+       ORDER BY created_at ASC`,
+      [sessionId]
+    );
+
+    const pendingAskUserQuestion = findPendingInteractivePromptFromRows(
+      askUserQuestionRows.map((row) => ({
+        id: row.id,
+        content: row.content,
+        createdAt: toMillis(row.created_at) ?? 0,
+      })),
+    );
+    if (pendingAskUserQuestion) {
+      return pendingAskUserQuestion as PendingInteractivePrompt;
+    }
+
     const { rows } = await databaseWorker.query<{
       id: string;
       content: string;
@@ -1467,7 +1600,6 @@ export class MetaAgentService {
          AND (hidden = FALSE OR hidden IS NULL)
          AND (
            (content LIKE '%"type":"exit_plan_mode_request"%' AND content LIKE '%"status":"pending"%')
-           OR (content LIKE '%"type":"nimbalyst_tool_use"%' AND content LIKE '%"name":"AskUserQuestion"%')
            OR (content LIKE '%"type":"nimbalyst_tool_use"%' AND content LIKE '%"name":"ToolPermission"%')
          )
        ORDER BY created_at ASC`,
@@ -1478,7 +1610,9 @@ export class MetaAgentService {
       try {
         const content = JSON.parse(row.content);
 
-        // Handle nimbalyst_tool_use format (AskUserQuestion and ToolPermission)
+        // AskUserQuestion is reconstructed above from both the Claude assistant
+        // tool_use shape and the legacy nimbalyst_tool_use shape. The remaining
+        // synthetic tool-use format here is ToolPermission.
         if (content.type === 'nimbalyst_tool_use') {
           const promptId = content.id || content.input?.requestId;
           if (!promptId) {
@@ -1502,20 +1636,6 @@ export class MetaAgentService {
 
           if (resultRows.length > 0) {
             continue;
-          }
-
-          if (content.name === 'AskUserQuestion') {
-            return {
-              id: row.id,
-              promptId,
-              promptType: 'ask_user_question_request',
-              createdAt: toMillis(row.created_at)!,
-              content: {
-                ...content,
-                questions: content.input?.questions || [],
-                questionId: promptId,
-              },
-            };
           }
 
           if (content.name === 'ToolPermission') {

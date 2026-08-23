@@ -351,7 +351,7 @@ export async function createApplicationMenu() {
                 },
                 {
                     id: 'file-import-claude-code-sessions',
-                    label: 'Import Claude Code Sessions...',
+                    label: 'Import Agent Sessions...',
                     click: async () => {
                         AnalyticsService.getInstance().sendEvent('claude_code_import_dialog_opened', {
                             source: 'file_menu',

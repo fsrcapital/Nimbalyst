@@ -19,6 +19,7 @@ import {
     getDefaultThinkingMode, setDefaultThinkingMode,
     isAnalyticsEnabled,
     getSessionSyncConfig, setSessionSyncConfig, SessionSyncConfig,
+    getWebAppAccessConfig, setWebAppAccessConfig,
     isExtensionDevToolsEnabled, setExtensionDevToolsEnabled,
     getAppSetting, setAppSetting,
     getAlphaFeatures, setAlphaFeatures,
@@ -73,6 +74,9 @@ import {
 import { purgeOfflineCollabAccounts } from '../services/CollabOfflineAccountLifecycle';
 import { listPersonalSyncDevices } from '../services/PersonalSyncDevicesService';
 import { recordProjectWalkOriginator } from '../services/ProjectWalkClaim';
+import { deriveRemoteGatewayToken } from '../mcp/remoteGateway';
+import { setWebAppSleepPrevention } from '../services/PowerSaveService';
+import { resolvePairingIdentity } from '../services/WebAppAccess';
 
 // Track if we've subscribed to sync status changes
 let syncStatusListenerSetup = false;
@@ -168,9 +172,46 @@ export function registerSettingsHandlers() {
     // ============================================================
     const settingsService = getSettingsService();
     settingsService.init();
+    const initialWebAppAccess = getWebAppAccessConfig();
+    setWebAppSleepPrevention(
+        initialWebAppAccess.enabledProjects.length > 0,
+        initialWebAppAccess.preventSleepMode,
+    );
 
     safeHandle('settings:getAll', () => {
         return settingsService.getAll();
+    });
+
+    // Direct Web App gateway permissions are intentionally independent from
+    // personal/mobile sync. These handlers never initialize Stytch, modify
+    // sessionSync, or reinitialize the upstream sync provider.
+    safeHandle('web-app:get-access', () => getWebAppAccessConfig());
+
+    safeHandle('web-app:set-project-selection', (_event, value: unknown) => {
+        const enabledProjects = Array.isArray(value)
+            ? Array.from(new Set(value.filter(
+                (project): project is string => typeof project === 'string' && project.trim().length > 0,
+            )))
+            : [];
+        const current = getWebAppAccessConfig();
+        const next = { ...current, enabledProjects };
+        setWebAppAccessConfig(next);
+        setWebAppSleepPrevention(enabledProjects.length > 0, next.preventSleepMode);
+        logger.store.info(`[web-app:set-project-selection] ${enabledProjects.length} project(s) authorized`);
+        return { success: true, ...next };
+    });
+
+    safeHandle('web-app:set-prevent-sleep', (_event, mode: unknown) => {
+        if (mode !== 'off' && mode !== 'always' && mode !== 'pluggedIn') {
+            throw new Error('Invalid Web App sleep-prevention mode');
+        }
+        const next: ReturnType<typeof getWebAppAccessConfig> = {
+            ...getWebAppAccessConfig(),
+            preventSleepMode: mode,
+        };
+        setWebAppAccessConfig(next);
+        setWebAppSleepPrevention(next.enabledProjects.length > 0, mode);
+        return { success: true, ...next };
     });
 
     safeHandle('settings:set', (_event, key: string, value: unknown) => {
@@ -1302,21 +1343,46 @@ export function registerSettingsHandlers() {
     });
 
     // Generate QR pairing payload for mobile device
-    safeHandle('credentials:generate-qr-payload', (_event, serverUrl: string) => {
+    safeHandle('credentials:generate-qr-payload', (_event, serverUrl: string, pairingTarget: 'ios' | 'web') => {
         if (!serverUrl) {
             throw new Error('serverUrl is required for QR pairing');
         }
+        if (pairingTarget !== 'ios' && pairingTarget !== 'web') {
+            throw new Error('pairingTarget must be ios or web');
+        }
         // Include the sync email so mobile can validate it matches their login.
         // Include personalOrgId/personalUserId so mobile uses the same room IDs as desktop.
-        const authState = StytchAuth.getAuthState();
-        const syncEmail = authState.user?.emails?.[0]?.email;
-        const personalOrgId = StytchAuth.getPersonalOrgId() ?? undefined;
-        const personalUserId = StytchAuth.getPersonalUserId() ?? undefined;
+        const { syncEmail, personalOrgId, personalUserId } = resolvePairingIdentity(pairingTarget, () => {
+            const authState = StytchAuth.getAuthState();
+            return {
+                syncEmail: authState.user?.emails?.[0]?.email,
+                personalOrgId: StytchAuth.getPersonalOrgId() ?? undefined,
+                personalUserId: StytchAuth.getPersonalUserId() ?? undefined,
+            };
+        });
+        let remoteGateway;
+        if (pairingTarget === 'web') {
+            const gatewayPort = (global as { mcpServerPort?: unknown }).mcpServerPort;
+            if (typeof gatewayPort !== 'number') {
+                throw new Error('Desktop remote gateway is not ready. Reopen pairing in a moment.');
+            }
+            const credentials = getCredentials();
+            const enabledProjects = getWebAppAccessConfig().enabledProjects;
+            remoteGateway = {
+                port: gatewayPort,
+                token: deriveRemoteGatewayToken(credentials.encryptionKeySeed),
+                pwaUrl: 'https://nimbalyst-command-center.fsrcapital.chatgpt.site',
+                workspaces: Array.from(new Set(enabledProjects)).map((workspacePath) => ({
+                    path: workspacePath,
+                    name: path.basename(workspacePath),
+                })),
+            };
+        }
 
         // Persist the sync identity at pairing time -- this is the authoritative
         // moment for which org sessions should sync to. Survives logout/re-login
         // so login order doesn't matter.
-        if (personalOrgId) {
+        if (pairingTarget === 'ios' && personalOrgId) {
             const currentConfig = getSessionSyncConfig();
             if (currentConfig) {
                 setSessionSyncConfig({
@@ -1332,6 +1398,7 @@ export function registerSettingsHandlers() {
             syncEmail,
             personalOrgId,
             personalUserId,
+            remoteGateway,
         );
     });
 

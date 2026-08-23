@@ -29,21 +29,6 @@ const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // OAuth returns credentials in the query string. Move them into a URL fragment
-    // immediately so the app can consume them without vinext serializing them into HTML.
-    if (url.pathname === "/pair/callback" && url.search) {
-      return new Response(null, {
-        status: 302,
-        headers: {
-          Location: `/pair/callback#${url.searchParams.toString()}`,
-          "Cache-Control": "no-store, max-age=0",
-          "Referrer-Policy": "no-referrer",
-          "X-Content-Type-Options": "nosniff",
-          "X-Frame-Options": "DENY",
-        },
-      });
-    }
-
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       return handleImageOptimization(request, {
@@ -61,7 +46,7 @@ const worker = {
     response.headers.set("X-Content-Type-Options", "nosniff");
     response.headers.set("X-Frame-Options", "DENY");
     response.headers.set("Permissions-Policy", "camera=(self), microphone=(), geolocation=()");
-    if (url.pathname.startsWith("/pair/") || url.search) {
+    if (url.search) {
       response.headers.set("Cache-Control", "no-store, max-age=0");
     }
     return response;

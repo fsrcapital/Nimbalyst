@@ -17,6 +17,21 @@ import { workspaceToWindowMap } from "./mcpWorkspaceResolver";
 import { requireMcpAuth } from "./mcpAuth";
 import { getAllowedClipOrigin, hasAllowedClipContentType } from "./clipRequestGuards";
 import { withTrackerSchemaWorkspace } from "../services/tracker/trackerSchemaScope";
+import { AISessionsRepository } from "@nimbalyst/runtime/storage/repositories/AISessionsRepository";
+import { getCredentials } from "../services/CredentialService";
+import { loadViewMessages } from "../utils/transcriptHelpers";
+import { serializeRemotePendingPrompt, serializeRemoteTranscript } from "./remoteTranscript";
+import { resolveRemoteGitLocation } from "./remoteSession";
+import { getDatabase } from "../database/initialize";
+import { createWorktreeStore } from "../services/WorktreeStore";
+import { GitWorktreeService } from "../services/GitWorktreeService";
+import { MetaAgentService } from "../services/MetaAgentService";
+import { listRemoteGatewayWorkspaces } from "./remoteGatewayWorkspaceAccess";
+import {
+  getWebPushPublicKey,
+  subscribeWebPush,
+  unsubscribeWebPush,
+} from "../services/WebPushNotificationService";
 
 // Extracted modules
 import {
@@ -117,6 +132,12 @@ import {
   selectExtensionToolsForEndpoint,
   applyCoreAlwaysLoadMeta,
 } from "./mcpEndpointRouting";
+import {
+  createRemoteGatewayRouter,
+  deriveRemoteGatewayToken,
+  isRemoteGatewayOriginAllowed,
+  isRemoteGatewayPath,
+} from "./remoteGateway";
 
 // Re-export functions that don't need transport state
 export {
@@ -149,6 +170,120 @@ const serverByNimbalystSession = new Map<string, Server>();
 // Store MCP Server instances by workspace path
 // Used to send tools/list_changed notifications when extension tools are registered
 const serversByWorkspace = new Map<string, Set<Server>>();
+
+const remoteGatewayCallerId = 'remote-command-center';
+let remoteGatewaySessionCanceller: ((sessionId: string) => Promise<unknown>) | null = null;
+
+export function setRemoteGatewaySessionCanceller(
+  canceller: ((sessionId: string) => Promise<unknown>) | null,
+): void {
+  remoteGatewaySessionCanceller = canceller;
+}
+
+function parseToolJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return { message: value };
+  }
+}
+
+const routeRemoteGatewayRequest = createRemoteGatewayRouter({
+  getToken: () => deriveRemoteGatewayToken(getCredentials().encryptionKeySeed),
+  listWorkspaces: async () => listRemoteGatewayWorkspaces(),
+  listSessions: async (workspacePath) => {
+    const sessions = (await AISessionsRepository.list(workspacePath))
+      .filter((session) => session.sessionType !== 'workstream')
+      .slice(0, 100);
+    const db = getDatabase();
+    const worktrees = db ? await createWorktreeStore(db).list(workspacePath) : [];
+    let mainBranch = '';
+    try {
+      mainBranch = await new GitWorktreeService().getRepoCurrentBranch(workspacePath);
+    } catch {
+      // Non-Git workspaces still report an explicit main working-tree path.
+    }
+    return Promise.all(sessions.map(async (session) => {
+      let status = 'idle';
+      try {
+        const statusResult = parseToolJson(await dispatchMetaAgentTool(
+          'get_session_status',
+          remoteGatewayCallerId,
+          workspacePath,
+          { sessionId: session.id },
+        )) as { status?: string };
+        status = statusResult.status ?? status;
+      } catch {
+        // The session list remains useful if one stale session status cannot be read.
+      }
+      return {
+        ...session,
+        status,
+        gitLocation: resolveRemoteGitLocation(session.worktreeId, workspacePath, mainBranch, worktrees),
+      };
+    }));
+  },
+  listSessionCreationOptions: async (workspacePath) =>
+    MetaAgentService.getInstance().listRemoteSessionCreationOptions(workspacePath),
+  createSession: async (workspacePath, input) =>
+    MetaAgentService.getInstance().createRemoteSession(workspacePath, input),
+  getSessionResult: async (workspacePath, sessionId) => parseToolJson(
+    await dispatchMetaAgentTool('get_session_result', remoteGatewayCallerId, workspacePath, {
+      sessionId,
+      includeFullResponse: false,
+    }),
+  ),
+  getTranscript: async (workspacePath, sessionId) => {
+    const session = await AISessionsRepository.get(sessionId);
+    if (!session || session.workspacePath !== workspacePath) {
+      throw new Error(`Session ${sessionId} not found.`);
+    }
+    const transcript = await loadViewMessages(sessionId, session.provider);
+    if (!transcript.success) throw new Error(transcript.error);
+    const sessionResult = parseToolJson(await dispatchMetaAgentTool(
+      'get_session_result',
+      remoteGatewayCallerId,
+      workspacePath,
+      { sessionId, includeFullResponse: false },
+    )) as { pendingPrompt?: unknown };
+    return {
+      ...serializeRemoteTranscript(transcript.messages),
+      pendingPrompt: serializeRemotePendingPrompt(sessionResult.pendingPrompt),
+    };
+  },
+  sendPrompt: async (workspacePath, sessionId, prompt) => parseToolJson(
+    await dispatchMetaAgentTool('send_prompt', remoteGatewayCallerId, workspacePath, { sessionId, prompt }),
+  ),
+  cancelSession: async (workspacePath, sessionId) => {
+    const session = await AISessionsRepository.get(sessionId);
+    if (!session || session.workspacePath !== workspacePath) {
+      throw new Error(`Session ${sessionId} not found.`);
+    }
+    if (!remoteGatewaySessionCanceller) {
+      throw new Error('Session cancellation is not ready yet. Restart the fork and try again.');
+    }
+    return remoteGatewaySessionCanceller(sessionId);
+  },
+  respondToPrompt: async (workspacePath, input) => parseToolJson(
+    await dispatchMetaAgentTool('respond_to_prompt', remoteGatewayCallerId, workspacePath, input),
+  ),
+  updateWorkflow: async (workspacePath, sessionId, workflow) => {
+    const session = await AISessionsRepository.get(sessionId);
+    if (!session || session.workspacePath !== workspacePath) {
+      throw new Error(`Session ${sessionId} not found.`);
+    }
+    await AISessionsRepository.updateMetadata(sessionId, { metadata: workflow });
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) {
+        window.webContents.send('sessions:session-updated', sessionId, workflow);
+      }
+    }
+    return { sessionId, success: true, workflow };
+  },
+  getWebPushPublicKey,
+  subscribeWebPush,
+  unsubscribeWebPush,
+});
 
 // Store the HTTP server instance
 let httpServerInstance: any = null;
@@ -755,6 +890,38 @@ async function tryCreateServer(port: number): Promise<any> {
         const parsedUrl = parseUrl(req.url || "", true);
         const pathname = parsedUrl.pathname;
         const mcpSessionIdHeader = getMcpSessionIdHeader(req);
+
+        if (isRemoteGatewayPath(pathname)) {
+          const originHeader = req.headers.origin;
+          const origin = Array.isArray(originHeader) ? originHeader[0] : originHeader;
+          const authorization = req.headers.authorization;
+          const token = typeof authorization === 'string'
+            ? authorization.match(/^Bearer\s+(.+)$/i)?.[1]?.trim()
+            : undefined;
+          const response = await routeRemoteGatewayRequest({
+            method: req.method ?? 'GET',
+            pathname: pathname ?? '',
+            origin,
+            token,
+            body: req.method === 'POST' ? await readJsonBody(req) : undefined,
+          });
+          if (isRemoteGatewayOriginAllowed(origin)) {
+            res.setHeader('Access-Control-Allow-Origin', origin!);
+            res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+            res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+            res.setHeader('Access-Control-Allow-Private-Network', 'true');
+            res.setHeader('Vary', 'Origin');
+          }
+          res.setHeader('Cache-Control', 'no-store');
+          if (response.status === 204) {
+            res.writeHead(204);
+            res.end();
+          } else {
+            res.writeHead(response.status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(response.body));
+          }
+          return;
+        }
 
         // Handle CORS preflight.
         // Issue #146: do not echo `Access-Control-Allow-Origin: *` on /mcp;

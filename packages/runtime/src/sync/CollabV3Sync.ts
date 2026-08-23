@@ -2034,7 +2034,6 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                     try {
                       projectId = await decryptProjectId(entry.encryptedProjectId, entry.projectIdIv, config.encryptionKey);
                     } catch (err) {
-                      console.warn(`[CollabV3] Cannot decrypt session ${entry.sessionId} (wrong encryption key, likely from before personal member id migration). Deleting from server index so it re-syncs with correct key.`);
                       decryptionFailedSessionIds.push(entry.sessionId);
                       return null;
                     }
@@ -2048,7 +2047,6 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                     try {
                       title = await decryptTitle(entry.encryptedTitle, entry.titleIv, config.encryptionKey);
                     } catch (err) {
-                      console.warn(`[CollabV3] Cannot decrypt session ${entry.sessionId} title (wrong encryption key). Deleting from server index so it re-syncs with correct key.`);
                       decryptionFailedSessionIds.push(entry.sessionId);
                       return null;
                     }
@@ -2263,8 +2261,11 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
               try {
                 projectId = await decryptProjectId(entry.encryptedProjectId, entry.projectIdIv, config.encryptionKey);
               } catch (err) {
-                console.error('[CollabV3] Failed to decrypt index entry projectId:', err);
-                projectId = 'unknown';
+                // A project ID is required to route a session safely. Broadcasts
+                // encrypted with an obsolete pairing key are discarded; the
+                // index-sync cleanup path removes and republishes those entries.
+                sessionIndexCache.delete(entry.sessionId);
+                return;
               }
             } else {
               projectId = 'unknown';

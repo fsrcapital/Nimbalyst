@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   createUser2Environment,
   resolveUser2DataDir,
@@ -52,6 +54,7 @@ test('creates an isolated user2 environment', () => {
   });
 
   assert.equal(environment.PRESERVED, 'yes');
+  assert.equal(environment.NIMBALYST_MCP_PORT, '3457');
   assert.equal(environment.VITE_PORT, '5274');
   assert.equal(environment.ELECTRON_ENTRY, 'out2/main/index.js');
   assert.equal(
@@ -70,4 +73,15 @@ test('uses a per-instance restart signal', () => {
     restartSignalPath('/tmp/@nimbalyst/electron-user2', '/repo/packages/electron'),
     path.join('/repo/packages/electron', '.restart-requested-electron-user2'),
   );
+});
+
+test('loads the main module only after the custom user-data path is configured', () => {
+  const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const bootstrap = readFileSync(path.resolve(testDirectory, '../../src/main/bootstrap.ts'), 'utf8');
+  const setPathIndex = bootstrap.indexOf("app.setPath('userData', customUserDataDir)");
+  const loadMainIndex = bootstrap.indexOf("import('./index.js')");
+
+  assert.equal(/^import\s+['"]\.\/index\.js['"];?$/m.test(bootstrap), false);
+  assert.notEqual(setPathIndex, -1);
+  assert.ok(loadMainIndex > setPathIndex);
 });

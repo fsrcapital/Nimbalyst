@@ -6,15 +6,29 @@
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "prefer_related_applications": false,
   "background_color": "#0b0b0d",
   "theme_color": "#0b0b0d",
   "orientation": "any",
   "icons": [
     {
-      "src": "/nimbalyst-icon.png",
-      "sizes": "800x800",
+      "src": "/nimbalyst-icon-192.png",
+      "sizes": "192x192",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "/nimbalyst-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/nimbalyst-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

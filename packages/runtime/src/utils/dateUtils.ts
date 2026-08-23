@@ -176,9 +176,9 @@ export function isToday(date: Date, reference: Date = new Date()): boolean {
 }
 
 /**
- * Format a timestamp for message display:
- * - If today: shows time only (e.g., "3:45:30 PM")
- * - If not today: shows short date + time (e.g., "Dec 4, 3:45 PM")
+ * Format a timestamp for message display with both date and time.
+ * Transcript sessions can span days or weeks, so today's messages retain
+ * their calendar date instead of relying on the viewer's current date.
  * Returns empty string for invalid timestamps
  */
 export function formatMessageTime(timestamp: number | string | Date | undefined | null): string {
@@ -186,14 +186,12 @@ export function formatMessageTime(timestamp: number | string | Date | undefined 
   if (!date) return '';
 
   try {
-    if (isToday(date)) {
-      return date.toLocaleTimeString();
-    }
     return date.toLocaleString(undefined, {
       month: 'short',
       day: 'numeric',
+      year: 'numeric',
       hour: 'numeric',
-      minute: '2-digit'
+      minute: '2-digit',
     });
   } catch {
     return '';

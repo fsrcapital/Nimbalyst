@@ -794,10 +794,16 @@ interface ElectronAPI {
   credentials: {
     get: () => Promise<{ encryptionKeySeed: string; createdAt: number; isSecure: boolean }>;
     reset: () => Promise<{ encryptionKeySeed: string; createdAt: number; isSecure: boolean }>;
-    generateQRPayload: (serverUrl: string) => Promise<{
+    generateQRPayload: (serverUrl: string, pairingTarget: 'ios' | 'web') => Promise<{
       version: number;
       serverUrl: string;
       encryptionKeySeed: string;
+      remoteGateway?: {
+        port: number;
+        token: string;
+        pwaUrl: string;
+        workspaces: Array<{ path: string; name: string }>;
+      };
     }>;
     isSecure: () => Promise<boolean>;
   };

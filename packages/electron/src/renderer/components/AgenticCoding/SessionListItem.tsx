@@ -4,7 +4,7 @@ import { MaterialSymbol } from '@nimbalyst/runtime/ui/icons/MaterialSymbol';
 import { WorktreeIcon } from '../common/WorktreeIcon';
 import { ProviderIcon } from '@nimbalyst/runtime/ui/icons/ProviderIcons';
 import { getRelativeTimeString } from '../../utils/dateFormatting';
-import { sessionOrChildProcessingAtom, sessionUnreadAtom, sessionPendingPromptAtom, sessionHasPendingInteractivePromptAtom, reparentSessionAtom, refreshSessionListAtom, sessionShareAtom, sessionWakeupAtom, sessionLastActivityAtom } from '../../store';
+import { sessionOrChildProcessingAtom, sessionProcessingAtom, sessionUnreadAtom, sessionPendingPromptAtom, sessionHasPendingInteractivePromptAtom, sessionActiveSubagentCountAtom, reparentSessionAtom, refreshSessionListAtom, sessionShareAtom, sessionWakeupAtom, sessionLastActivityAtom } from '../../store';
 import { convertToWorkstreamAtom } from '../../store/atoms/sessions';
 import { SessionContextMenu } from './SessionContextMenu';
 import { FullTitleTooltip } from './FullTitleTooltip';
@@ -86,6 +86,31 @@ export const SessionStatusIndicator = memo<{ sessionId: string; messageCount?: n
   // }
 
   return null;
+});
+
+/** Token-free execution summary backed by live provider/session metadata. */
+export const SessionExecutionLabel = memo<{ sessionId: string; showIdle?: boolean }>(({ sessionId, showIdle = true }) => {
+  const isProcessing = useAtomValue(sessionProcessingAtom(sessionId));
+  const activeSubagentCount = useAtomValue(sessionActiveSubagentCountAtom(sessionId));
+
+  const label = activeSubagentCount > 0
+    ? `${activeSubagentCount} subagent${activeSubagentCount === 1 ? '' : 's'} working`
+    : isProcessing
+      ? 'Main agent working'
+      : showIdle
+        ? 'Idle'
+        : '';
+  if (!label) return null;
+
+  return (
+    <span
+      className={`session-execution-label inline-flex items-center gap-1 whitespace-nowrap ${activeSubagentCount > 0 || isProcessing ? 'text-[var(--nim-primary)]' : 'text-[var(--nim-text-faint)]'}`}
+      title={`Execution: ${label}. Derived from session state without prompting the agent.`}
+    >
+      <MaterialSymbol icon={activeSubagentCount > 0 ? 'groups' : isProcessing ? 'smart_toy' : 'pause'} size={10} />
+      {label}
+    </span>
+  );
 });
 
 const PHASE_STYLES: Record<string, { label: string; color: string; bg: string }> = {
@@ -550,6 +575,13 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
               <span className="session-list-item-datetime text-[0.6875rem] text-[var(--nim-text-faint)] whitespace-nowrap transition-colors duration-150" title={fullDateTime}>{relativeTime}</span>
               {displayModel && <span className="session-list-item-model overflow-hidden text-ellipsis whitespace-nowrap">{displayModel}</span>}
               {phase && <SessionPhaseBadge phase={phase} />}
+            </div>
+            <div className="session-list-item-runtime mt-0.5 flex min-w-0 items-center gap-2 text-[0.625rem]">
+              <SessionExecutionLabel sessionId={id} />
+              <span className="session-git-location inline-flex min-w-0 items-center gap-1 text-[var(--nim-text-muted)]" title={isWorktreeSession ? 'Git location: worktree' : 'Git location: main working tree'}>
+                <MaterialSymbol icon="account_tree" size={10} />
+                <span className="overflow-hidden text-ellipsis whitespace-nowrap">{isWorktreeSession ? 'Worktree' : 'Main tree'}</span>
+              </span>
             </div>
             {(waitingOn || nextAction) && (
               <div

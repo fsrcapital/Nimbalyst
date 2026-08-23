@@ -35,6 +35,7 @@ export function createUser2Environment(options = {}) {
   return {
     ...environment,
     NIMBALYST_USER_DATA_DIR: userDataDir,
+    NIMBALYST_MCP_PORT: '3457',
     VITE_PORT: '5274',
     ELECTRON_ENTRY: 'out2/main/index.js',
   };
@@ -86,7 +87,7 @@ export async function runUser2({ loop = false } = {}) {
   const electronVite = resolvePackageBinary('electron-vite');
 
   console.log(`[dev:user2] Using userData directory: ${userDataDir}`);
-  console.log('[dev:user2] Using Vite port 5274 and isolated build output: out2/');
+  console.log('[dev:user2] Using Vite port 5274, gateway port 3457, and isolated build output: out2/');
   console.log('[dev:user2] Building @nimbalyst/extension-sdk...');
 
   const sdkStatus = run(

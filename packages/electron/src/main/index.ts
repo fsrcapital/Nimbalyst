@@ -60,6 +60,7 @@ import { registerActionPromptHandlers } from './ipc/ActionPromptHandlers';
 import { registerClaudeCodeHandlers } from './ipc/ClaudeCodeHandlers';
 import { registerCodexAuthHandlers } from './ipc/CodexAuthHandlers';
 import { initializeClaudeCodeSessionHandlers } from './ipc/ClaudeCodeSessionHandlers';
+import { initializeCodexSessionHandlers } from './ipc/CodexSessionHandlers';
 import { registerNotificationHandlers } from './ipc/NotificationHandlers';
 import { registerPermissionHandlers } from './ipc/PermissionHandlers';
 import { registerGitStatusHandlers } from './ipc/GitStatusHandlers';
@@ -148,7 +149,7 @@ import {
   resolveWorkspaceAttachmentStagingDirectory,
 } from './services/attachments/attachmentStagingRoot';
 import { cliManager, initEnhancedPath, getEnhancedPath, getShellEnvironment } from './services/CLIManager';
-import { registerWorkspaceWindow, registerExtensionTools, shutdownHttpServer, startMcpHttpServer, updateDocumentState, getActiveExtensionShortNames } from './mcp/httpServer';
+import { registerWorkspaceWindow, registerExtensionTools, setRemoteGatewaySessionCanceller, shutdownHttpServer, startMcpHttpServer, updateDocumentState, getActiveExtensionShortNames } from './mcp/httpServer';
 import { writeMcpEndpointDescriptor, removeMcpEndpointDescriptor, type EndpointWorkspace } from './mcp/mcpEndpointDescriptor';
 import {
   startWorkspaceBackendModules,
@@ -1967,6 +1968,7 @@ app.whenReady().then(async () => {
     registerClaudeCodeHandlers();
     registerCodexAuthHandlers();
     initializeClaudeCodeSessionHandlers();  // Initialize Claude Code session import
+    initializeCodexSessionHandlers();
     registerAnalyticsHandlers();
     registerFeatureUsageHandlers();
     registerNotificationHandlers();
@@ -2636,6 +2638,7 @@ app.whenReady().then(async () => {
         throw new Error('AI session store unavailable after database initialization');
     }
     aiService = new AIService(runtimeSessionStore);
+    setRemoteGatewaySessionCanceller((sessionId) => aiService!.cancelSessionRequest(sessionId));
     markEnd('ai-service-init');
 
     // Recovery sweep: any queued_prompts row that was 'executing' when the
@@ -2731,7 +2734,8 @@ app.whenReady().then(async () => {
     }
 
     try {
-        const result = await startMcpHttpServer(3456);
+        const configuredMcpPort = Number.parseInt(process.env.NIMBALYST_MCP_PORT ?? '3456', 10);
+        const result = await startMcpHttpServer(Number.isFinite(configuredMcpPort) ? configuredMcpPort : 3456);
         mcpHttpServer = result.httpServer;
         logger.mcp.info('MCP SSE server started on port', result.port);
 

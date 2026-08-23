@@ -4,9 +4,9 @@
  * This file handles custom user-data-dir configuration, which must be set
  * before any electron-store usage.
  *
- * Note: electron-store is lazy-initialized in store.ts, so we can use static
- * imports without worrying about load order. The stores are created on first
- * access, which happens well after app.setPath() is called here.
+ * The main module is loaded dynamically at the end of this file. A static ESM
+ * import would be evaluated before this bootstrap body and could initialize
+ * app settings against the installed app's user-data directory.
  *
  * Native modules (node-pty) are handled via explicit path resolution in
  * TerminalSessionManager.ts using createRequire, which eliminates the need
@@ -101,8 +101,6 @@ if (process.env.NODE_ENV !== 'production') {
   // console.log(`[Bootstrap] CDP remote debugging enabled on port ${cdpPort}`);
 }
 
-// Static import - no chunk boundary, no module duplication issues.
-// This works because:
-// 1. electron-store is lazy-initialized (store.ts)
-// 2. node-pty uses explicit path resolution (TerminalSessionManager.ts)
-import './index.js';
+// This is the one approved dynamic main-process import: custom userData must be
+// established before index.ts can touch any electron-store consumer.
+void import('./index.js');

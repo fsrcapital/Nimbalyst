@@ -9,7 +9,7 @@ interface SessionToImport {
   title: string;
   createdAt: number;
   updatedAt: number;
-  messageCount: number;
+  messageCount: number | null;
   tokenUsage: {
     inputTokens: number;
     outputTokens: number;
@@ -18,6 +18,7 @@ interface SessionToImport {
   };
   syncStatus: 'new' | 'up-to-date' | 'needs-update';
   selected: boolean;
+  fileSizeBytes?: number;
 }
 
 interface SessionsByWorkspace {
@@ -27,9 +28,16 @@ interface SessionsByWorkspace {
 interface SessionImportDialogProps {
   isOpen: boolean;
   onClose: () => void;
-  onImport: (sessionIds: string[]) => Promise<void>;
+  onImport: (provider: 'claude-code' | 'openai-codex', sessionIds: string[]) => Promise<void>;
   currentWorkspacePath: string;
   filterByWorkspace?: boolean; // If true, only show sessions for current workspace
+}
+
+function formatFileSize(bytes: number | undefined): string | null {
+  if (!bytes || bytes < 0) return null;
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
 export const SessionImportDialog: React.FC<SessionImportDialogProps> = ({
@@ -46,13 +54,7 @@ export const SessionImportDialog: React.FC<SessionImportDialogProps> = ({
   const [scopeNotice, setScopeNotice] = useState<string | null>(null);
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState('');
-
-  // Load sessions when dialog opens
-  useEffect(() => {
-    if (isOpen) {
-      loadSessions();
-    }
-  }, [isOpen]);
+  const [provider, setProvider] = useState<'claude-code' | 'openai-codex'>('claude-code');
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
@@ -61,7 +63,8 @@ export const SessionImportDialog: React.FC<SessionImportDialogProps> = ({
 
     try {
       const scanSessions = async (workspacePath?: string) => {
-        return window.electronAPI.invoke('claude-code:scan-sessions', { workspacePath });
+        const channel = provider === 'openai-codex' ? 'codex:scan-sessions' : 'claude-code:scan-sessions';
+        return window.electronAPI.invoke(channel, { workspacePath });
       };
 
       // Prefer the current workspace for performance, but do not fail closed if
@@ -77,7 +80,7 @@ export const SessionImportDialog: React.FC<SessionImportDialogProps> = ({
       ) {
         result = await scanSessions();
         if (result.success && Array.isArray(result.sessions) && result.sessions.length > 0) {
-          setScopeNotice('No sessions matched this exact workspace path. Showing all Claude Agent sessions instead.');
+          setScopeNotice(`No sessions matched this exact workspace path. Showing all ${provider === 'openai-codex' ? 'Codex' : 'Claude Agent'} sessions instead.`);
         }
       }
 
@@ -110,7 +113,11 @@ export const SessionImportDialog: React.FC<SessionImportDialogProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [currentWorkspacePath, filterByWorkspace]);
+  }, [currentWorkspacePath, filterByWorkspace, provider]);
+
+  useEffect(() => {
+    if (isOpen) void loadSessions();
+  }, [isOpen, loadSessions]);
 
   const handleImport = async () => {
     const selectedSessionIds = sessions
@@ -125,7 +132,7 @@ export const SessionImportDialog: React.FC<SessionImportDialogProps> = ({
     setError(null);
 
     try {
-      await onImport(selectedSessionIds);
+      await onImport(provider, selectedSessionIds);
       onClose();
     } catch (err) {
       console.error('[SessionImportDialog] Failed to import sessions:', err);
@@ -213,7 +220,7 @@ export const SessionImportDialog: React.FC<SessionImportDialogProps> = ({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="session-import-dialog-header flex items-center justify-between px-5 py-4 border-b border-[var(--nim-border)]">
-          <h2 className="m-0 text-base font-semibold text-[var(--nim-text)]">Import Claude Agent Sessions</h2>
+          <h2 className="m-0 text-base font-semibold text-[var(--nim-text)]">Import Agent Sessions</h2>
           <button
             className="session-import-dialog-close bg-transparent border-none text-[var(--nim-text-muted)] cursor-pointer p-1 flex items-center justify-center rounded transition-colors duration-150 hover:bg-[var(--nim-bg-hover)] hover:text-[var(--nim-text)]"
             onClick={onClose}
@@ -225,9 +232,28 @@ export const SessionImportDialog: React.FC<SessionImportDialogProps> = ({
           </button>
         </div>
 
+        <div className="session-import-provider-tabs flex gap-2 px-5 py-3 border-b border-[var(--nim-border)] bg-[var(--nim-bg-secondary)]">
+          <button
+            type="button"
+            className={provider === 'claude-code' ? 'nim-btn-primary' : 'nim-btn-secondary'}
+            onClick={() => setProvider('claude-code')}
+            disabled={importing}
+          >
+            Claude Code
+          </button>
+          <button
+            type="button"
+            className={provider === 'openai-codex' ? 'nim-btn-primary' : 'nim-btn-secondary'}
+            onClick={() => setProvider('openai-codex')}
+            disabled={importing}
+          >
+            Codex
+          </button>
+        </div>
+
         {loading ? (
           <div className="session-import-dialog-loading py-10 px-5 text-center text-[var(--nim-text-muted)]">
-            <p>Scanning ~/.claude/projects/...</p>
+            <p>{provider === 'openai-codex' ? 'Scanning ~/.codex/sessions/...' : 'Scanning ~/.claude/projects/...'}</p>
           </div>
         ) : error ? (
           <div className="session-import-dialog-error py-10 px-5 text-center text-[var(--nim-text-muted)]">
@@ -294,7 +320,7 @@ export const SessionImportDialog: React.FC<SessionImportDialogProps> = ({
             <div className="session-import-dialog-content flex-1 overflow-y-auto py-3">
               {workspacePaths.length === 0 ? (
                 <div className="session-import-empty py-10 px-5 text-center text-[var(--nim-text-muted)]">
-                  <p>No Claude Agent sessions found</p>
+                  <p>No {provider === 'openai-codex' ? 'Codex' : 'Claude Agent'} sessions found</p>
                   <p className="session-import-empty-hint text-[13px] mt-2 text-[var(--nim-text-faint)]">
                     Sessions from the CLI will appear here
                   </p>
@@ -362,9 +388,19 @@ export const SessionImportDialog: React.FC<SessionImportDialogProps> = ({
                                 <div className="session-import-session-meta text-xs text-[var(--nim-text-muted)] flex items-center gap-1.5">
                                   <span>{getRelativeTimeString(session.updatedAt)}</span>
                                   <span>•</span>
-                                  <span>{session.messageCount} messages</span>
-                                  <span>•</span>
-                                  <span>{session.tokenUsage.totalTokens.toLocaleString()} tokens</span>
+                                  {session.messageCount === null ? (
+                                    <>
+                                      <span>{formatFileSize(session.fileSizeBytes) ?? 'History found'}</span>
+                                      <span>•</span>
+                                      <span>Details counted on import</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <span>{session.messageCount} messages</span>
+                                      <span>•</span>
+                                      <span>{session.tokenUsage.totalTokens.toLocaleString()} tokens</span>
+                                    </>
+                                  )}
                                   <span>•</span>
                                   <span
                                     className={`session-import-status-badge px-1.5 py-0.5 rounded text-[11px] font-medium ${

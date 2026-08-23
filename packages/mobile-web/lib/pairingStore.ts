@@ -1,18 +1,8 @@
 import type { PairingAccount } from "./pairing";
 
-export type AuthSession = {
-  sessionToken: string;
-  sessionJwt: string;
-  userId: string;
-  email?: string;
-  orgId: string;
-  expiresAt?: string;
-};
-
 export type StoredPairing = {
   account: PairingAccount;
   encryptionKey: CryptoKey;
-  auth?: AuthSession;
 };
 
 const databaseName = "nimbalyst-command-center";
@@ -53,14 +43,6 @@ export async function getStoredPairing(): Promise<StoredPairing | undefined> {
 
 export async function saveStoredPairing(pairing: StoredPairing): Promise<void> {
   await transact<IDBValidKey>("readwrite", (store) => store.put(pairing, activeKey));
-}
-
-export async function saveAuthSession(auth: AuthSession): Promise<StoredPairing> {
-  const pairing = await getStoredPairing();
-  if (!pairing) throw new Error("Pairing information was lost. Scan the desktop QR again.");
-  const updated = { ...pairing, auth };
-  await saveStoredPairing(updated);
-  return updated;
 }
 
 export async function clearStoredPairing(): Promise<void> {
