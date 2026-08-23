@@ -94,9 +94,9 @@ export const SessionExecutionLabel = memo<{ sessionId: string; showIdle?: boolea
   const activeSubagentCount = useAtomValue(sessionActiveSubagentCountAtom(sessionId));
 
   const label = activeSubagentCount > 0
-    ? `${activeSubagentCount} subagent${activeSubagentCount === 1 ? '' : 's'} working`
+    ? `${activeSubagentCount} Subagent${activeSubagentCount === 1 ? '' : 's'} Working`
     : isProcessing
-      ? 'Main agent working'
+      ? 'Main Agent Working'
       : showIdle
         ? 'Idle'
         : '';
@@ -578,9 +578,9 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
             </div>
             <div className="session-list-item-runtime mt-0.5 flex min-w-0 items-center gap-2 text-[0.625rem]">
               <SessionExecutionLabel sessionId={id} />
-              <span className="session-git-location inline-flex min-w-0 items-center gap-1 text-[var(--nim-text-muted)]" title={isWorktreeSession ? 'Git location: worktree' : 'Git location: main working tree'}>
+              <span className="session-git-location inline-flex min-w-0 items-center gap-1 text-[var(--nim-text-muted)]" title={isWorktreeSession ? 'Git Location: Worktree' : 'Git Location: Main Working Tree'}>
                 <MaterialSymbol icon="account_tree" size={10} />
-                <span className="overflow-hidden text-ellipsis whitespace-nowrap">{isWorktreeSession ? 'Worktree' : 'Main tree'}</span>
+                <span className="overflow-hidden text-ellipsis whitespace-nowrap">{isWorktreeSession ? 'Worktree' : 'Main Tree'}</span>
               </span>
             </div>
             {(waitingOn || nextAction) && (

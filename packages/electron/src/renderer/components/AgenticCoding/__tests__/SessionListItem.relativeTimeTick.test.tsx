@@ -13,6 +13,8 @@ vi.mock('jotai', () => ({
 vi.mock('@nimbalyst/runtime', () => ({ MaterialSymbol: () => null, ProviderIcon: () => null }));
 vi.mock('../../../store', () => ({
   sessionOrChildProcessingAtom: () => ({}),
+  sessionProcessingAtom: () => ({}),
+  sessionActiveSubagentCountAtom: () => ({}),
   sessionUnreadAtom: () => ({}),
   sessionPendingPromptAtom: () => ({}),
   sessionHasPendingInteractivePromptAtom: () => ({}),

@@ -17,6 +17,8 @@ vi.mock('@nimbalyst/runtime', () => ({ MaterialSymbol: () => null, ProviderIcon:
 // avoid the vi.mock hoisting TDZ.
 vi.mock('../../../store', () => ({
   sessionOrChildProcessingAtom: () => ({}),
+  sessionProcessingAtom: () => ({}),
+  sessionActiveSubagentCountAtom: () => ({}),
   sessionUnreadAtom: () => ({}),
   sessionPendingPromptAtom: () => ({}),
   sessionHasPendingInteractivePromptAtom: () => ({}),
