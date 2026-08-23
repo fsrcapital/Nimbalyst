@@ -26,6 +26,14 @@ export function MobileAppSettingsPanel() {
   );
 }
 
+export function WebAppSettingsPanel() {
+  return (
+    <section className="web-app-settings-panel" data-testid="web-app-settings-panel" data-component="WebAppSettingsPanel">
+      <SyncPanel section="web" />
+    </section>
+  );
+}
+
 export function AccountDevicesSettingsPanel() {
   return (
     <section className="account-devices-settings-panel" data-testid="account-devices-settings-panel" data-component="AccountDevicesSettingsPanel">

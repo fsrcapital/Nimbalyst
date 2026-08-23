@@ -19,7 +19,11 @@ import type {
   ChatSession,
   AgentMessage
 } from '@nimbalyst/runtime';
-import { filterSessionsForPersonalSync } from '@nimbalyst/runtime/sync';
+import {
+  filterSessionsForPersonalSync,
+  normalizeSessionWorkflowMetadata,
+  resolveSessionAttention,
+} from '@nimbalyst/runtime/sync';
 
 type PGliteLike = {
   query<T = any>(sql: string, params?: any[]): Promise<{ rows: T[] }>;
@@ -53,6 +57,36 @@ function buildSessionArchiveFilter(includeArchived: boolean, sessionAlias = 's',
 // Shared with other JSON-typed column readers; see ../utils/jsonColumn.ts
 // for the metadata-corruption postmortem.
 const normalizeJsonObject = parseJsonObjectColumn;
+
+function buildWorkflowListFields(metadata: Record<string, any>): Pick<
+  SessionMeta,
+  'myNotes' | 'nextAction' | 'waitingOn' | 'attentionReasons' | 'needsAttention'
+> {
+  const workflow = normalizeSessionWorkflowMetadata(metadata);
+  const attention = resolveSessionAttention({
+    workflow,
+    hasPendingPrompt: metadata.hasPendingPrompt === true,
+  });
+
+  return {
+    ...workflow,
+    attentionReasons: attention.reasons.length ? attention.reasons : undefined,
+    needsAttention: attention.needsAttention,
+  };
+}
+
+function countActiveSubagents(metadata: Record<string, any>): number {
+  const activeTasks = Array.isArray(metadata.currentTasks)
+    ? metadata.currentTasks.filter((task: any) => task?.status === 'running').length
+    : 0;
+  const activeTeammates = Array.isArray(metadata.currentTeammates)
+    ? metadata.currentTeammates.filter((teammate: any) => teammate?.status === 'running').length
+    : 0;
+
+  // Claude task telemetry and agent-team metadata can describe the same
+  // delegated work. Taking the larger channel avoids inflating the count.
+  return Math.max(activeTasks, activeTeammates);
+}
 
 /**
  * Parse a TEXT column that's supposed to hold JSON back into the value the
@@ -737,12 +771,14 @@ export function createPGLiteSessionStore(db: PGliteLike, ensureDbReady?: EnsureR
           // Replaces the legacy `metadata.pendingAskUserQuestion` flag,
           // which nothing was writing.
           hasPendingInteractivePrompt: !!metadata.hasPendingPrompt,
+          activeSubagentCount: countActiveSubagents(metadata),
           // Kanban board phase and tags from metadata JSONB
           phase: metadata.phase ?? undefined,
           tags: Array.isArray(metadata.tags) ? metadata.tags : undefined,
           // Linked tracker item IDs from metadata JSONB
           linkedTrackerItemIds: Array.isArray(metadata.linkedTrackerItemIds) ? metadata.linkedTrackerItemIds : undefined,
-        } satisfies SessionMeta & { hasPendingInteractivePrompt?: boolean; phase?: string; tags?: string[]; linkedTrackerItemIds?: string[] };
+          ...buildWorkflowListFields(metadata),
+        } satisfies SessionMeta;
       });
     },
 
@@ -795,6 +831,7 @@ export function createPGLiteSessionStore(db: PGliteLike, ensureDbReady?: EnsureR
             s.branched_from_session_id,
             s.branch_point_message_id,
             s.branched_at,
+            s.metadata,
             COALESCE(child_stats.child_count, 0) as child_count
           FROM ai_sessions s
           LEFT JOIN worktrees w ON s.worktree_id = w.id
@@ -871,6 +908,7 @@ export function createPGLiteSessionStore(db: PGliteLike, ensureDbReady?: EnsureR
           s.branched_from_session_id,
           s.branch_point_message_id,
           s.branched_at,
+          s.metadata,
           ts_rank_cd(to_tsvector('english', COALESCE(s.title, '')), plainto_tsquery('english', $2)) * 2 as rank,
           COALESCE(child_stats.child_count, 0) as child_count
         FROM ai_sessions s
@@ -967,6 +1005,7 @@ export function createPGLiteSessionStore(db: PGliteLike, ensureDbReady?: EnsureR
         const updatedAt = toMillis(row.updated_at)!;
         const branchedAt = toMillis(row.branched_at) ?? undefined;
         const childCount = parseInt(row.child_count) || 0;
+        const metadata = normalizeJsonObject(row.metadata);
         return {
           id: row.id,
           provider: row.provider,
@@ -989,6 +1028,9 @@ export function createPGLiteSessionStore(db: PGliteLike, ensureDbReady?: EnsureR
           branchedFromSessionId: row.branched_from_session_id ?? undefined,
           branchPointMessageId: row.branch_point_message_id ? parseInt(row.branch_point_message_id) : undefined,
           branchedAt,
+          hasPendingInteractivePrompt: !!metadata.hasPendingPrompt,
+          activeSubagentCount: countActiveSubagents(metadata),
+          ...buildWorkflowListFields(metadata),
         } satisfies SessionMeta;
       });
     },

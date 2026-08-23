@@ -22,6 +22,7 @@
 import { AISessionsRepository } from '@nimbalyst/runtime';
 import { getSyncProvider } from '../SyncManager';
 import { requestMobilePush } from './mobilePushRequest';
+import { notifyWebPushWaiting } from '../WebPushNotificationService';
 import { TrayManager } from '../../tray/TrayManager';
 import { logger } from '../../utils/logger';
 
@@ -114,10 +115,17 @@ async function notifyMobileOfBlockedSession(sessionId: string): Promise<void> {
   try {
     const session = await AISessionsRepository.get(sessionId);
     const title = session?.title || 'AI Session';
-    await requestMobilePush(sessionId, title, 'Waiting for your response', {
-      force: true,
-      reason: 'awaiting_human',
-    });
+    await Promise.all([
+      requestMobilePush(sessionId, title, 'Waiting for your response', {
+        force: true,
+        reason: 'awaiting_human',
+      }),
+      notifyWebPushWaiting({
+        sessionId,
+        title,
+        workspacePath: session?.workspacePath,
+      }),
+    ]);
   } catch (err) {
     logger.main.warn(
       `[pendingPromptPersistence] Failed to request mobile push for blocked session ${sessionId}:`,

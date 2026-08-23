@@ -44,6 +44,20 @@ describe("codexToolCallResolver", () => {
     })).toBe("call_direct");
   });
 
+  it("uses Codex exec callId metadata for nested Nimbalyst MCP prompts", () => {
+    expect(extractToolUseIdFromMcpRequest({
+      params: {
+        _meta: {
+          callId: "exec-d442f356-b888-46ee-8aab-411506066afb",
+          "x-codex-turn-metadata": {
+            session_id: "session-1",
+            turn_id: "turn-1",
+          },
+        },
+      },
+    })).toBe("exec-d442f356-b888-46ee-8aab-411506066afb");
+  });
+
   it("finds the raw call id for the matching turn and tool", () => {
     const contents = [
       JSON.stringify({

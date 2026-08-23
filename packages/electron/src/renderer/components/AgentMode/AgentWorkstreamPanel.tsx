@@ -45,6 +45,7 @@ import { ChatSidebar } from '../ChatSidebar/ChatSidebar';
 import { LayoutControls } from '../UnifiedAI/LayoutControls';
 import { ActiveSessionMcpStatusChip } from '../AgenticCoding/McpSessionStatusChip';
 import { WorktreeIcon } from '../common/WorktreeIcon';
+import { SessionExecutionLabel } from '../AgenticCoding/SessionListItem';
 import { toggleWorkstreamHeaderPin } from './workstreamHeaderPin';
 import {
   worktreeRecordAtom,
@@ -623,6 +624,7 @@ const WorkstreamHeader: React.FC<{
   const worktreeChipName = worktreeId
     ? (worktreeRecord?.name || (worktreePath ? getWorktreeNameFromPath(worktreePath, '') : ''))
     : '';
+  const worktreeBranch = worktreeId ? worktreeRecord?.branch : '';
 
   // Pin state lives on the worktree record for worktrees and on the session
   // record otherwise — the same split the sidebar context menus use.
@@ -714,9 +716,10 @@ const WorkstreamHeader: React.FC<{
                 title={worktreePath ? `Worktree: ${worktreeChipName}\n${worktreePath}` : `Worktree: ${worktreeChipName}`}
               >
                 <WorktreeIcon size={10} />
-                {worktreeChipName}
+                Worktree · {worktreeChipName}{worktreeBranch ? ` · ${worktreeBranch}` : ''}
               </span>
             )}
+            {activeSessionId && <SessionExecutionLabel sessionId={activeSessionId} />}
             <WorkstreamHeaderTagsRow workstreamId={workstreamId} />
           </div>
         </div>
@@ -1090,6 +1093,7 @@ export const AgentWorkstreamPanel = React.memo(React.forwardRef<AgentWorkstreamP
             name: worktree.name,
             displayName: worktree.displayName ?? null,
             path: worktree.path,
+            branch: worktree.branch,
             isPinned: worktree.isPinned ?? false,
           });
         } else {

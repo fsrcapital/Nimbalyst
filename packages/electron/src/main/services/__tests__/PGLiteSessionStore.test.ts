@@ -299,6 +299,67 @@ describe('PGLiteSessionStore JSON-column read normalization', () => {
     expect(list[0]?.phase).toBe('validating');
     expect(list[0]?.hasUnread).toBe(true);
   });
+
+  it('list() surfaces the number of active delegated agents without reading the transcript', async () => {
+    const db = {
+      query: vi.fn(async () => ({
+        rows: [{
+          ...makeRow({
+            metadata: JSON.stringify({
+              currentTasks: [
+                { taskId: 'task-1', status: 'running' },
+                { taskId: 'task-2', status: 'completed' },
+              ],
+              currentTeammates: [
+                { agentId: 'agent-1', status: 'running' },
+                { agentId: 'agent-2', status: 'running' },
+              ],
+            }),
+          }),
+          child_count: 0,
+          effective_updated_at: new Date(0),
+        }],
+      })),
+    };
+    const store = createPGLiteSessionStore(db as any);
+
+    const [session] = await store.list('/ws');
+
+    // The two metadata channels may describe the same delegated agents, so
+    // list() takes the larger count instead of double-counting them.
+    expect(session.activeSubagentCount).toBe(2);
+  });
+
+  it('list() surfaces workflow fields and derives attention without a schema migration', async () => {
+    const db = {
+      query: vi.fn(async () => ({
+        rows: [
+          makeRow({
+            metadata: JSON.stringify({
+              myNotes: 'Preserve the upstream sync path',
+              nextAction: 'Ask Codex to review',
+              waitingOn: 'A test account',
+              attentionReasons: ['review', 'manual-testing'],
+              hasPendingPrompt: true,
+            }),
+            child_count: 0,
+            effective_updated_at: new Date(0),
+          }),
+        ],
+      })),
+    };
+    const store = createPGLiteSessionStore(db as any);
+
+    const [session] = await store.list('/ws');
+
+    expect(session).toMatchObject({
+      myNotes: 'Preserve the upstream sync path',
+      nextAction: 'Ask Codex to review',
+      waitingOn: 'A test account',
+      needsAttention: true,
+      attentionReasons: ['user-input', 'review', 'manual-testing', 'blocked'],
+    });
+  });
 });
 
 describe('PGLiteSessionStore.updateMetadata defense-in-depth', () => {

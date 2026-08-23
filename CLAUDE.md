@@ -255,6 +255,7 @@ See the Critical Rules block above ("Always Run Your Own Observation Commands").
 ## General Development Guidelines
 
 - **Never use emojis** — not in commits, code, or documentation, unless explicitly requested
+- **Use Title Case for user-facing UI headings, field labels, tabs, and action buttons** — for example, `New Agent Session` and `Session Name`. Keep explanatory sentences, status messages, placeholders, and error text in normal sentence case.
 - **Never use overly enthusiastic phrases** ("Perfect!", "Terrific!", etc.)
 - **Never commit changes unless explicitly asked**
 - **Never commit files under `nimbalyst-local/`** — gitignored, local-only working files

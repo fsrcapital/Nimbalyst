@@ -46,6 +46,21 @@ describe('isIndexClientMetadataOnlyUpdate routing predicate', () => {
       ).toBe(false);
     });
 
+    it('routes human workflow metadata through indexUpdate', () => {
+      for (const metadata of [
+        { myNotes: 'Check this' },
+        { nextAction: 'Review' },
+        { waitingOn: 'CI' },
+        { attentionReasons: ['review'] },
+      ]) {
+        expect(
+          isIndexClientMetadataOnlyUpdateForTest(
+            m(metadata as Partial<SyncedSessionMetadata>),
+          ),
+        ).toBe(false);
+      }
+    });
+
     it('routes { lastReadAt } through indexUpdate (cross-device unread badges)', () => {
       expect(
         isIndexClientMetadataOnlyUpdateForTest(m({ lastReadAt: 123 } as Partial<SyncedSessionMetadata>)),

@@ -24,6 +24,25 @@
 /** Per-session count of interactive prompts currently blocking a turn. */
 const liveInteractivePrompts = new Map<string, number>();
 
+export interface LiveRemoteInteractivePrompt {
+  id: string;
+  promptId: string;
+  promptType: 'ask_user_question_request';
+  createdAt: number;
+  content: Record<string, unknown>;
+}
+
+/**
+ * Live prompt details that remote clients need before a provider has persisted
+ * the corresponding transcript row. Codex can invoke Nimbalyst MCP tools from
+ * inside its `exec` wrapper, so its saved rollout does not expose the nested
+ * AskUserQuestion until after the blocking call has settled.
+ */
+const liveRemoteInteractivePrompts = new Map<
+  string,
+  Map<string, LiveRemoteInteractivePrompt>
+>();
+
 /** Record that an interactive prompt has begun blocking a session's turn. */
 export function noteLiveInteractivePrompt(sessionKey: string): void {
   if (!sessionKey) return;
@@ -49,4 +68,36 @@ export function countLiveInteractivePrompts(sessionKey: string): number {
 /** Whether any interactive prompt is currently blocking this session's turn. */
 export function hasLiveInteractivePrompt(sessionKey: string): boolean {
   return countLiveInteractivePrompts(sessionKey) > 0;
+}
+
+/** Make a blocking prompt discoverable by the remote gateway immediately. */
+export function noteLiveRemoteInteractivePrompt(
+  sessionKey: string,
+  prompt: LiveRemoteInteractivePrompt,
+): void {
+  if (!sessionKey || !prompt.promptId) return;
+  const prompts = liveRemoteInteractivePrompts.get(sessionKey) ?? new Map();
+  prompts.set(prompt.promptId, prompt);
+  liveRemoteInteractivePrompts.set(sessionKey, prompts);
+}
+
+/** Remove the live remote projection when its waiter settles. */
+export function clearLiveRemoteInteractivePrompt(
+  sessionKey: string,
+  promptId: string,
+): void {
+  if (!sessionKey || !promptId) return;
+  const prompts = liveRemoteInteractivePrompts.get(sessionKey);
+  if (!prompts) return;
+  prompts.delete(promptId);
+  if (prompts.size === 0) liveRemoteInteractivePrompts.delete(sessionKey);
+}
+
+/** Return the oldest live prompt for a session, matching durable prompt order. */
+export function getLiveRemoteInteractivePrompt(
+  sessionKey: string,
+): LiveRemoteInteractivePrompt | null {
+  const prompts = liveRemoteInteractivePrompts.get(sessionKey);
+  if (!prompts || prompts.size === 0) return null;
+  return [...prompts.values()].sort((left, right) => left.createdAt - right.createdAt)[0] ?? null;
 }

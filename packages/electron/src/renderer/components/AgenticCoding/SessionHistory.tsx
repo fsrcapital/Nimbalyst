@@ -4,6 +4,7 @@ import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import { CollapsibleGroup } from './CollapsibleGroup';
 import { WorktreeBaseBranchPicker } from './WorktreeBaseBranchPicker';
 import { SessionListItem } from './SessionListItem';
+import { getNeedsAttentionEntries, NeedsAttentionView } from './NeedsAttentionView';
 import { WorkstreamGroup } from './WorkstreamGroup';
 import { BlitzGroup } from './BlitzGroup';
 import { SuperLoopGroup } from './SuperLoopGroup';
@@ -410,6 +411,7 @@ const SessionHistoryComponent: React.FC = () => {
   const setShowArchived = setShowArchivedAtom;
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
   const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(new Set()); // Format: "blitz:id", "worktree:id", "workstream:id", "superloop:id", "meta-agent:id"
+  const [showNeedsAttention, setShowNeedsAttention] = useState(false);
   const lastSelectedIdRef = useRef<string | null>(null); // For shift+click range selection
   // Tracks the last searchQuery|tagFilter|mode combination the title-filter effect ran for, so
   // it can tell a real user-driven filter change apart from an unrelated `allSessions` reference
@@ -440,6 +442,20 @@ const SessionHistoryComponent: React.FC = () => {
   const viewMode = useAtomValue(viewModeAtom);
   const setViewMode = useSetAtom(setViewModeAtom);
   const posthog = usePostHog();
+  const needsAttentionEntries = useMemo(
+    () => getNeedsAttentionEntries(sessionRegistry, workspacePath),
+    [sessionRegistry, workspacePath],
+  );
+  const attentionWorktreeLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const [worktreeId, worktree] of worktreeCache) {
+      labels.set(
+        worktreeId,
+        worktree.displayName || worktree.name || worktree.branch || `Worktree ${worktreeId.slice(0, 8)}`,
+      );
+    }
+    return labels;
+  }, [worktreeCache]);
 
   // FTS index build dialog state
   const [showIndexDialog, setShowIndexDialog] = useState(false);
@@ -3033,7 +3049,7 @@ const SessionHistoryComponent: React.FC = () => {
     />
   );
 
-  if (sessions.length === 0 && !hasSearchQuery && !hasTagFilter) {
+  if (sessions.length === 0 && !hasSearchQuery && !hasTagFilter && !showNeedsAttention) {
     // No sessions at all - show simple empty state without search.
     // When a search or tag filter is active we fall through to the main render so
     // the search input and tag chips stay mounted -- otherwise the user can't
@@ -3120,6 +3136,24 @@ const SessionHistoryComponent: React.FC = () => {
         showAccent={false}
         actions={
           <>
+          <HelpTooltip testId="session-needs-attention-button">
+            <button
+              className={`flex items-center gap-1 px-2 py-1.5 text-[11px] font-semibold rounded border cursor-pointer transition-all duration-150 shrink-0 ${showNeedsAttention ? 'bg-[var(--nim-warning)] border-[var(--nim-warning)] text-black hover:opacity-90' : 'bg-[var(--nim-bg-secondary)] border-[var(--nim-border)] text-[var(--nim-text-muted)] hover:bg-[var(--nim-bg-hover)] hover:border-[var(--nim-warning)] hover:text-[var(--nim-text)]'}`}
+              data-testid="session-needs-attention-button"
+              onClick={() => {
+                setShowNeedsAttention((current) => !current);
+                clearSelection();
+              }}
+              aria-label={showNeedsAttention ? 'Show all sessions' : 'Show sessions needing attention'}
+              title={showNeedsAttention ? 'Show all sessions' : 'Needs Attention'}
+            >
+              <MaterialSymbol icon="notification_important" size={13} />
+              <span>Attention</span>
+              <span className={`min-w-4 rounded-full px-1 text-center text-[10px] tabular-nums ${showNeedsAttention ? 'bg-black/15' : 'bg-[var(--nim-bg-tertiary)] text-[var(--nim-warning)]'}`}>
+                {needsAttentionEntries.length}
+              </span>
+            </button>
+          </HelpTooltip>
           <HelpTooltip testId="session-kanban-button">
             <button
               className={`flex items-center gap-1 px-2 py-1.5 text-[11px] font-semibold rounded border cursor-pointer transition-all duration-150 shrink-0 ${viewMode === 'kanban' ? 'bg-[var(--nim-primary)] border-[var(--nim-primary)] text-white hover:opacity-90' : 'bg-[var(--nim-bg-secondary)] border-[var(--nim-border)] text-[var(--nim-text-muted)] hover:bg-[var(--nim-bg-hover)] hover:border-[var(--nim-primary)] hover:text-[var(--nim-text)]'}`}
@@ -3189,7 +3223,10 @@ const SessionHistoryComponent: React.FC = () => {
           </>
         }
       />
-      <div className="session-history-section-label px-3 py-1.5 text-[11px] font-semibold text-[var(--nim-text-faint)] uppercase tracking-wider border-b border-[var(--nim-border)] bg-[var(--nim-bg-secondary)] shrink-0">Agent Sessions</div>
+      <div className="session-history-section-label px-3 py-1.5 text-[11px] font-semibold text-[var(--nim-text-faint)] uppercase tracking-wider border-b border-[var(--nim-border)] bg-[var(--nim-bg-secondary)] shrink-0">
+        {showNeedsAttention ? 'Needs Attention' : 'Agent Sessions'}
+      </div>
+      {!showNeedsAttention && (
       <div className="session-history-search px-3 py-2 border-b border-[var(--nim-border)] shrink-0 relative z-10">
         <input
           ref={searchInputRef}
@@ -3413,7 +3450,9 @@ const SessionHistoryComponent: React.FC = () => {
           </div>
         )}
       </div>
+      )}
       <div className="session-history-filters flex items-center px-3 py-2 border-b border-[var(--nim-border)] gap-1.5 shrink-0">
+        {!showNeedsAttention && (
         <button
           className={`session-history-archive-filter flex items-center justify-center px-1.5 py-1 text-xs rounded border border-[var(--nim-border)] bg-[var(--nim-bg-secondary)] text-[var(--nim-text-faint)] cursor-pointer transition-all duration-150 outline-none hover:bg-[var(--nim-bg-tertiary)] hover:border-[var(--nim-primary)] hover:text-[var(--nim-text)] [&_svg]:block ${showArchived ? 'bg-[var(--nim-primary)] border-[var(--nim-primary)] text-white hover:opacity-90' : ''}`}
           onClick={toggleShowArchived}
@@ -3425,7 +3464,18 @@ const SessionHistoryComponent: React.FC = () => {
             <path d="M6 8h4" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round"/>
           </svg>
         </button>
+        )}
         {(() => {
+          if (showNeedsAttention) {
+            return (
+              <span
+                className="session-history-match-count text-[11px] text-[var(--nim-text-faint)] tabular-nums"
+                data-testid="needs-attention-match-count"
+              >
+                {needsAttentionEntries.length} session{needsAttentionEntries.length === 1 ? '' : 's'} need attention
+              </span>
+            );
+          }
           const hasFilter = searchQuery.trim().length > 0 || tagFilter.tags.length > 0;
           const visibleCount = sessions.length;
           const totalLabel = `${iosMatchCount} non-archived session${iosMatchCount === 1 ? '' : 's'} in this workspace (matches the iOS project list count)`;
@@ -3444,6 +3494,7 @@ const SessionHistoryComponent: React.FC = () => {
             </span>
           );
         })()}
+        {!showNeedsAttention && (
         <div className="session-history-sort-dropdown ml-auto relative">
           <button
             className="session-history-sort-button flex items-center justify-center px-1.5 py-1 text-xs rounded border border-[var(--nim-border)] bg-[var(--nim-bg-secondary)] text-[var(--nim-text-muted)] cursor-pointer transition-all duration-150 outline-none hover:bg-[var(--nim-bg-tertiary)] hover:border-[var(--nim-primary)] hover:text-[var(--nim-text)] [&_svg]:block"
@@ -3482,8 +3533,9 @@ const SessionHistoryComponent: React.FC = () => {
             </div>
           )}
         </div>
+        )}
       </div>
-      {(selectedSessionIds.size > 0 || selectedGroupIds.size > 0) && (
+      {!showNeedsAttention && (selectedSessionIds.size > 0 || selectedGroupIds.size > 0) && (
         <div className="session-history-bulk-actions flex items-center justify-between px-3 py-2 bg-[var(--nim-bg-selected)] border-b border-[var(--nim-border)] gap-2">
           <span className="session-history-bulk-count text-xs font-medium text-[var(--nim-text)]">{selectedSessionIds.size + selectedGroupIds.size} selected</span>
           <div className="session-history-bulk-buttons flex gap-1.5">
@@ -3519,7 +3571,18 @@ const SessionHistoryComponent: React.FC = () => {
         </div>
       )}
       <div className="session-history-list nim-scrollbar flex-1 overflow-y-auto overflow-x-hidden py-2 scroll-smooth" ref={scrollContainerCallbackRef}>
-        {groupKeys.length === 0 && (hasSearchQuery || hasTagFilter) ? (
+        {showNeedsAttention ? (
+          <NeedsAttentionView
+            entries={needsAttentionEntries}
+            activeSessionId={activeSessionId}
+            worktreeLabels={attentionWorktreeLabels}
+            onSelect={(sessionId) => handleSessionClick(sessionId, {
+              metaKey: false,
+              ctrlKey: false,
+              shiftKey: false,
+            })}
+          />
+        ) : groupKeys.length === 0 && (hasSearchQuery || hasTagFilter) ? (
           // No results for the active search/tag filter - offer a clear affordance
           <div className="session-history-empty flex flex-col items-center justify-center px-4 py-8 text-center text-[var(--nim-text-faint)] text-[13px]">
             <p className="my-1">No matching sessions found</p>
@@ -3786,6 +3849,11 @@ const SessionHistoryComponent: React.FC = () => {
                     uncommittedCount={session.uncommittedCount}
                     branchedAt={session.branchedAt}
                     phase={session.phase}
+                    myNotes={session.myNotes}
+                    nextAction={session.nextAction}
+                    waitingOn={session.waitingOn}
+                    attentionReasons={session.attentionReasons}
+                    needsAttention={session.needsAttention}
                   />
                 );
               }}

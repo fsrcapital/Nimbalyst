@@ -67,6 +67,7 @@ export function extractToolUseIdFromMcpRequest(request: unknown): string | undef
     requestMeta?.["claudecode/toolUseId"],
     requestMeta?.["openai/toolUseId"],
     requestMeta?.["openai/toolCallId"],
+    requestMeta?.["callId"],
     requestMeta?.["toolUseId"],
     requestMeta?.["tool_use_id"],
     requestMeta?.["toolCallId"],

@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const updateMetadata = vi.fn();
 const getSession = vi.fn();
 const requestMobilePush = vi.fn();
+const notifyWebPushWaiting = vi.fn();
 const trayManager = { onPromptCreated: vi.fn(), onPromptResolved: vi.fn() };
 
 vi.mock('@nimbalyst/runtime', () => ({
@@ -14,6 +15,9 @@ vi.mock('@nimbalyst/runtime', () => ({
 vi.mock('../../SyncManager', () => ({ getSyncProvider: () => null }));
 vi.mock('../mobilePushRequest', () => ({
   requestMobilePush: (...args: unknown[]) => requestMobilePush(...args),
+}));
+vi.mock('../../WebPushNotificationService', () => ({
+  notifyWebPushWaiting: (...args: unknown[]) => notifyWebPushWaiting(...args),
 }));
 vi.mock('../../../tray/TrayManager', () => ({
   TrayManager: { getInstance: () => trayManager },
@@ -125,6 +129,7 @@ describe('blocked session pages the phone', () => {
       deliveredCount: 1,
       skipped: [],
     });
+    notifyWebPushWaiting.mockReset().mockResolvedValue(undefined);
     trayManager.onPromptCreated.mockReset();
     trayManager.onPromptResolved.mockReset();
   });
@@ -139,6 +144,11 @@ describe('blocked session pages the phone', () => {
       'Waiting for your response',
       { force: true, reason: 'awaiting_human' },
     );
+    expect(notifyWebPushWaiting).toHaveBeenCalledWith({
+      sessionId: 's1',
+      title: 'Fix the parser',
+      workspacePath: undefined,
+    });
   });
 
   it('does not push again while the same prompt is still open', async () => {

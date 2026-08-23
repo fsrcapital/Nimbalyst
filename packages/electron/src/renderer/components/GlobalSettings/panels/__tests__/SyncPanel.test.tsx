@@ -31,7 +31,8 @@ vi.mock('../../../../contexts/DialogContext', () => ({
   useDialog: () => ({ confirm: vi.fn() }),
 }));
 vi.mock('../QRPairingModal', () => ({
-  QRPairingModal: () => null,
+  QRPairingModal: ({ isOpen, pairingTarget }: { isOpen: boolean; pairingTarget: string }) =>
+    isOpen ? <div data-testid="qr-pairing-modal" data-target={pairingTarget} /> : null,
 }));
 vi.mock('../../../Accounts/AccountLoginForm', () => ({
   AccountLoginForm: () => null,
@@ -83,6 +84,59 @@ function renderAccounts(accounts: PersonalAccountSummary[], configOverrides: Rec
   return store;
 }
 
+function renderPairingSection(section: 'mobile' | 'web') {
+  const store = createStore();
+  store.set(syncConfigAtom, {
+    enabled: true,
+    serverUrl: '',
+    enabledProjects: ['C:\\Code\\Nimbalyst'],
+    docSyncEnabledProjects: [],
+    idleTimeoutMinutes: 5,
+  });
+  store.set(stytchAuthAtom, { isAuthenticated: true, user: { user_id: 'user-1' } });
+  render(
+    <Provider store={store}>
+      <SyncPanel section={section} />
+    </Provider>,
+  );
+}
+
+function renderWebAccess(options: { authenticated?: boolean } = {}) {
+  const projectPath = 'C:\\Code\\Nimbalyst';
+  const invoke = vi.fn(async (channel: string, ...args: unknown[]) => {
+    if (channel === 'get-recent-workspaces') {
+      return [{ path: projectPath, name: 'Nimbalyst' }];
+    }
+    if (channel === 'web-app:get-access') {
+      return { enabledProjects: [projectPath], preventSleepMode: 'pluggedIn' };
+    }
+    if (channel === 'web-app:set-project-selection') {
+      return { success: true, enabledProjects: args[0] };
+    }
+    return undefined;
+  });
+  (window as any).electronAPI.invoke = invoke;
+
+  const store = createStore();
+  store.set(syncConfigAtom, {
+    enabled: false,
+    serverUrl: '',
+    enabledProjects: [],
+    docSyncEnabledProjects: [],
+    idleTimeoutMinutes: 5,
+  });
+  store.set(stytchAuthAtom, {
+    isAuthenticated: options.authenticated ?? false,
+    user: null,
+  });
+  render(
+    <Provider store={store}>
+      <SyncPanel section="web" />
+    </Provider>,
+  );
+  return { invoke, projectPath };
+}
+
 describe('SyncPanel', () => {
   beforeEach(() => {
     mocks.dialogRef.current = { open: vi.fn() };
@@ -121,6 +175,46 @@ describe('SyncPanel', () => {
 
     expect(screen.queryByText('Sharing Sessions & Documents')).toBeNull();
     expect(screen.queryByText(/create an encrypted share link/i)).toBeNull();
+  });
+
+  it('opens native iOS pairing from the Mobile App section', () => {
+    renderPairingSection('mobile');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pair iPhone' }));
+
+    expect(screen.getByTestId('qr-pairing-modal').getAttribute('data-target')).toBe('ios');
+  });
+
+  it('persists Web App projects independently from personal sync', async () => {
+    const { invoke, projectPath } = renderWebAccess({ authenticated: true });
+
+    await waitFor(() => {
+      expect(document.querySelector('[aria-label="Allow Nimbalyst in Web App"]')).not.toBeNull();
+    });
+    const checkbox = document.querySelector('[aria-label="Allow Nimbalyst in Web App"]') as HTMLInputElement;
+    expect((checkbox as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(checkbox);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('web-app:set-project-selection', []);
+    });
+    expect(invoke).not.toHaveBeenCalledWith(
+      'sync:set-project-selection',
+      expect.objectContaining({ enabledProjects: expect.anything() }),
+    );
+    expect(projectPath).toBe('C:\\Code\\Nimbalyst');
+  });
+
+  it('allows direct Web App pairing without an upstream account sign-in', async () => {
+    renderWebAccess();
+
+    await waitFor(() => {
+      expect(document.querySelector('[aria-label="Allow Nimbalyst in Web App"]:checked')).not.toBeNull();
+    });
+    const pairButton = await screen.findByRole('button', { name: 'Pair Web App' });
+    fireEvent.click(pairButton);
+
+    expect(screen.getByTestId('qr-pairing-modal').getAttribute('data-target')).toBe('web');
   });
 
   /**

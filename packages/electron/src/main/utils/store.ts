@@ -16,6 +16,7 @@ import {
   ORG_PROJECT_WALK_DISMISSED_SETTING_KEY,
 } from '../../shared/orgProjectWalk';
 import { normalizeCodexProviderConfig, omitModelsField } from '@nimbalyst/runtime/ai/server/utils/modelConfigUtils';
+import { normalizeWebAppAccessConfig, type WebAppAccessConfig } from '../services/WebAppAccess';
 
 // Theme can be a built-in theme or an extension theme ID (format: "extensionId:themeId")
 export type AppTheme = 'dark' | 'light' | 'system' | 'auto' | 'crystal-dark' | string;
@@ -78,6 +79,19 @@ export const DEFAULT_DATABASE_MAINTENANCE: DatabaseMaintenanceSettings = {
   // default. See the rollout in the storage plan.
   toolOutputRetentionDays: 0,
 };
+
+export interface PersistedWebPushSubscription {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+  deviceLabel?: string;
+  createdAt: number;
+}
+
+export interface PersistedWebPushState {
+  vapidPublicKey: string;
+  vapidPrivateKey: string;
+  subscriptions: PersistedWebPushSubscription[];
+}
 
 interface AppStoreSchema {
   theme: AppTheme;
@@ -221,6 +235,12 @@ interface AppStoreSchema {
     // Dev-only: override environment (defaults to 'production' even in dev builds)
     environment?: 'development' | 'production';
   };
+  // Direct desktop-gateway access for the browser Web App. This is purposely
+  // separate from sessionSync so PWA access cannot enable upstream sync.
+  webAppAccess?: WebAppAccessConfig;
+  // Browser push identity and per-device subscriptions for the paired Web App.
+  // This remains local to the desktop; private VAPID material is never returned.
+  webPush?: PersistedWebPushState;
   // Stytch Auth Configuration (project ID and public token only - secret stored in keychain)
   stytchAuth?: {
     projectId: string;
@@ -1834,6 +1854,22 @@ export function setSessionSyncConfig(config: SessionSyncConfig | undefined): voi
   } else {
     getAppStore().delete('sessionSync');
   }
+}
+
+export function getWebAppAccessConfig(): WebAppAccessConfig {
+  return normalizeWebAppAccessConfig(getAppStore().get('webAppAccess'));
+}
+
+export function setWebAppAccessConfig(config: WebAppAccessConfig): void {
+  getAppStore().set('webAppAccess', normalizeWebAppAccessConfig(config));
+}
+
+export function getWebPushState(): PersistedWebPushState | undefined {
+  return getAppStore().get('webPush');
+}
+
+export function setWebPushState(state: PersistedWebPushState): void {
+  getAppStore().set('webPush', state);
 }
 
 // Stytch Auth Configuration

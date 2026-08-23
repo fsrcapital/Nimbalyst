@@ -46,6 +46,10 @@ import {
 import { validateBackendModules } from '@nimbalyst/extension-sdk';
 import { ModelIdentifier } from '@nimbalyst/runtime/ai/server/types';
 import type { ReleaseChannel } from '../utils/store';
+import {
+  parseClaudeCliInstalledPluginsJson,
+  type ClaudeCliInstalledPlugins,
+} from './claudeCliInstalledPlugins';
 import { buildExtensionFindFilesPlan } from './extensionFindFilesPlan';
 import { database } from '../database/PGLiteDatabaseWorker';
 import { isAllowedToContributeBackendModules } from '../extensions/backendModuleAllowlist';
@@ -643,21 +647,6 @@ async function scanDirectoryForClaudePlugins(
 }
 
 /**
- * Structure of the Claude Code CLI installed plugins file (~/.claude/plugins/installed_plugins.json)
- */
-interface ClaudeCliInstalledPlugins {
-  version: number;
-  plugins: Record<string, Array<{
-    scope: 'user' | 'project';
-    projectPath?: string;  // Only present for project-scoped plugins
-    installPath: string;
-    version: string;
-    installedAt: string;
-    lastUpdated: string;
-  }>>;
-}
-
-/**
  * Get Claude CLI plugins installed via the /plugin command.
  * Reads from ~/.claude/plugins/installed_plugins.json
  *
@@ -679,7 +668,7 @@ async function getClaudeCliPluginPaths(workspacePath?: string): Promise<Array<{ 
 
     let installedPlugins: ClaudeCliInstalledPlugins;
     try {
-      installedPlugins = JSON.parse(content);
+      installedPlugins = parseClaudeCliInstalledPluginsJson(content);
     } catch (parseError) {
       logger.main.error(`[ExtensionHandlers] Failed to parse CLI plugins JSON at ${installedPluginsPath}:`, parseError);
       return [];

@@ -7,10 +7,33 @@ planStatus:
   priority: high
   owner: ghinkle
   stakeholders: []
-  tags: [mobile, ios, app-store, testflight, deployment]
-  created: "2026-02-15"
-  updated: "2026-02-15"
+  tags:
+    - mobile
+    - ios
+    - app-store
+    - testflight
+    - deployment
+  created: '2026-02-15'
+  updated: '2026-02-15'
   progress: 0
+planId: plan-ios-app-store-deployment
+title: iOS App Store Deployment Plan
+status: planned
+planType: deployment
+priority: low
+owner: ghinkle
+stakeholders: []
+tags:
+  - mobile
+  - ios
+  - app-store
+  - testflight
+  - deployment
+created: '2026-02-15'
+updated: '2026-08-22'
+progress: 0
+trackerStatus:
+  type: plan
 ---
 
 # iOS App Store Deployment Plan

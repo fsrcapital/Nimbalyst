@@ -22,7 +22,9 @@ import type { ShareDialogData } from '../../dialogs';
 import { SessionContextMenu } from './SessionContextMenu';
 import { SessionRelativeTime } from './SessionRelativeTime';
 import { FullTitleTooltip } from './FullTitleTooltip';
+import { SessionWorkflowPopover } from './SessionWorkflowPopover';
 import { sessionAgentWakePendingAtom } from '../../store/atoms/teamInbox';
+import { SessionExecutionLabel } from './SessionListItem';
 
 /**
  * Unified component for rendering expandable session groups in the session history.
@@ -668,6 +670,15 @@ export const WorkstreamGroup: React.FC<WorkstreamGroupProps> = ({
               )}
             </div>
             <div className="workstream-group-row-secondary flex items-center gap-1.5 flex-wrap">
+              {type === 'worktree' && worktree?.branch && (
+                <span
+                  className="workstream-group-git-location inline-flex items-center gap-1 text-[0.625rem] text-[var(--nim-text-muted)]"
+                  title={`Git worktree branch: ${worktree.branch}`}
+                >
+                  <MaterialSymbol icon="account_tree" size={10} />
+                  Worktree · {worktree.branch}
+                </span>
+              )}
               {/* Git status badges for worktrees */}
               {type === 'worktree' && gitStatus && (
                 <>
@@ -1067,12 +1078,15 @@ const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
   onBranch,
   onRemoveFromWorkstream,
 }) => {
+  const [isHovering, setIsHovering] = useState(false);
   const [showContextMenu, setShowContextMenu] = useState(false);
   const [contextMenuPosition, setContextMenuPosition] = useState({ x: 0, y: 0 });
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const renameInputRef = useRef<HTMLInputElement>(null);
   const shareInfo = useAtomValue(sessionShareAtom(session.id));
+  const hasInteractivePrompt = useAtomValue(sessionHasPendingInteractivePromptAtom(session.id));
+  const hasPendingPrompt = useAtomValue(sessionPendingPromptAtom(session.id));
 
   const currentTitle = useAtomValue(sessionListTitleAtom(session.id));
   const displayTitle = currentTitle || session.title || 'Untitled Session';
@@ -1148,6 +1162,8 @@ const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
         isActive ? 'active bg-[var(--nim-bg-selected)]' : 'hover:bg-[var(--nim-bg-hover)]'
       } ${session.isArchived ? 'opacity-60 hover:opacity-80' : ''} focus:outline-2 focus:outline-[var(--nim-border-focus)] focus:outline-offset-[-2px]`}
       onClick={onClick}
+      onMouseEnter={() => setIsHovering(true)}
+      onMouseLeave={() => setIsHovering(false)}
       onContextMenu={handleContextMenu}
       role="button"
       tabIndex={0}
@@ -1199,9 +1215,19 @@ const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
           <span className="workstream-session-item-timestamp shrink-0 text-[0.6875rem] text-[var(--nim-text-faint)] ml-2">
             <SessionRelativeTime sessionId={session.id} fallbackTimestamp={session.updatedAt || session.createdAt} />
           </span>
+          <SessionExecutionLabel sessionId={session.id} showIdle={false} />
         </>
       )}
       <div className="workstream-session-item-right flex items-center gap-1 shrink-0">
+        <SessionWorkflowPopover
+          sessionId={session.id}
+          myNotes={session.myNotes}
+          nextAction={session.nextAction}
+          waitingOn={session.waitingOn}
+          attentionReasons={session.attentionReasons}
+          hasPendingPrompt={hasInteractivePrompt || hasPendingPrompt}
+          isRowHovering={isHovering}
+        />
         <WorkstreamSessionStatusIndicator sessionId={session.id} uncommittedCount={session.uncommittedCount} />
       </div>
 

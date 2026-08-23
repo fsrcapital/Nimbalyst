@@ -42,8 +42,10 @@ import {
   shouldSettleFromSessionFallback,
 } from "./interactivePromptFallback";
 import {
+  clearLiveRemoteInteractivePrompt,
   clearLiveInteractivePrompt,
   noteLiveInteractivePrompt,
+  noteLiveRemoteInteractivePrompt,
 } from "./interactivePromptLiveness";
 import {
   attachInteractivePromptCall,
@@ -329,7 +331,19 @@ export async function handleAskUserQuestion(
   // NIM-2208: registered immediately before the wait and cleared in settle, so
   // the stale-prompt reconcile can never clear the "awaiting input" bit while
   // this handler is genuinely blocked.
-  if (sessionId) noteLiveInteractivePrompt(sessionId);
+  if (sessionId) {
+    noteLiveInteractivePrompt(sessionId);
+    noteLiveRemoteInteractivePrompt(sessionId, {
+      id: questionId,
+      promptId: questionId,
+      promptType: 'ask_user_question_request',
+      createdAt: responseNotBefore,
+      content: {
+        questions: normalizedQuestions,
+        questionId,
+      },
+    });
+  }
 
   return new Promise((resolve) => {
     let settled = false;
@@ -344,7 +358,10 @@ export async function handleAskUserQuestion(
       if (settled) return;
       settled = true;
       detachCall?.();
-      if (sessionId) clearLiveInteractivePrompt(sessionId);
+      if (sessionId) {
+        clearLiveInteractivePrompt(sessionId);
+        clearLiveRemoteInteractivePrompt(sessionId, questionId);
+      }
 
       // The client walking away does not answer the question. Tear the waiter
       // down (below) but leave the widget answerable -- a later answer finds no

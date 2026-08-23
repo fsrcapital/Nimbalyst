@@ -28,6 +28,7 @@ vi.mock('../../../store', () => {
   });
   return {
     sessionProcessingAtom: () => value(false),
+    sessionActiveSubagentCountAtom: () => value(0),
     sessionUnreadAtom: () => value(false),
     sessionPendingPromptAtom: () => value(false),
     sessionHasPendingInteractivePromptAtom: () => value(false),
@@ -58,6 +59,29 @@ vi.mock('../../../dialogs', () => ({
 
 vi.mock('../SessionRelativeTime', () => ({
   SessionRelativeTime: () => <span data-testid="relative-time" />,
+}));
+
+vi.mock('../SessionWorkflowPopover', () => ({
+  SessionWorkflowPopover: ({
+    sessionId,
+    myNotes,
+    nextAction,
+    waitingOn,
+  }: {
+    sessionId: string;
+    myNotes?: string;
+    nextAction?: string;
+    waitingOn?: string;
+  }) => (
+    <button
+      type="button"
+      aria-label="Edit session workflow"
+      data-session-id={sessionId}
+      data-my-notes={myNotes}
+      data-next-action={nextAction}
+      data-waiting-on={waitingOn}
+    />
+  ),
 }));
 
 vi.mock('../SessionContextMenu', () => ({
@@ -147,6 +171,26 @@ afterEach(() => {
 });
 
 describe('expanded workstream child pin reconciliation', () => {
+  it('offers notes and workflow editing on nested session rows', () => {
+    renderExpandedWorkstream([
+      session({
+        id: targetId,
+        title: 'Target',
+        myNotes: 'Review the final diff',
+        nextAction: 'Run the smoke test',
+        waitingOn: 'Test environment',
+      }),
+    ], vi.fn());
+
+    const workflowButton = within(childRows()[0]).getByRole('button', {
+      name: 'Edit session workflow',
+    });
+    expect(workflowButton.dataset.sessionId).toBe(targetId);
+    expect(workflowButton.dataset.myNotes).toBe('Review the final diff');
+    expect(workflowButton.dataset.nextAction).toBe('Run the smoke test');
+    expect(workflowButton.dataset.waitingOn).toBe('Test environment');
+  });
+
   it('reconciles true -> false without refresh or removal', async () => {
     const target = session({
       id: targetId,

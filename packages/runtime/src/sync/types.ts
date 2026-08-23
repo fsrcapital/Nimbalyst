@@ -8,6 +8,7 @@
 import type { PushRejectionCause, SkipReason } from '@nimbalyst/collab-protocol';
 
 import type { AgentMessage } from '../ai/server/types';
+import type { SessionAttentionReason } from '../ai/sessionWorkflow';
 import type { PersonalJwt, PersonalMemberId } from '../auth/jwtScopes';
 import type { SyncedReadReceipt } from '../readReceipts/readReceipts';
 
@@ -189,6 +190,10 @@ export interface SyncProvider {
       queuedPromptCount?: number;
       /** Decrypted queued prompts when the payload is present. */
       queuedPrompts?: SyncedQueuedPrompt[];
+      myNotes?: string;
+      nextAction?: string;
+      waitingOn?: string;
+      attentionReasons?: SessionAttentionReason[];
     }>;
     projects: Array<{
       projectId: string;
@@ -226,6 +231,10 @@ export interface SyncProvider {
     draftInput?: string;
     /** Epoch ms when draftInput was last updated by the sending device */
     draftUpdatedAt?: number;
+    myNotes?: string;
+    nextAction?: string;
+    waitingOn?: string;
+    attentionReasons?: SessionAttentionReason[];
   }) => void): () => void;
 
   /** Get cached metadata for a session (populated from syncResponse and metadataBroadcast) */
@@ -263,6 +272,10 @@ export interface SyncProvider {
     queuedPromptCount?: number;
     /** Decrypted queued prompts */
     queuedPrompts?: Array<{ id: string; prompt: string; timestamp: number }>;
+    myNotes?: string;
+    nextAction?: string;
+    waitingOn?: string;
+    attentionReasons?: SessionAttentionReason[];
   } | undefined;
 
   /** Clear isExecuting in all cached index entries (for startup cleanup) */
@@ -551,6 +564,14 @@ export interface SyncedSessionMetadata {
   phase?: string;
   /** Arbitrary tags for categorization */
   tags?: string[];
+  /** Human-authored notes for supervising this session. */
+  myNotes?: string;
+  /** Next human or agent action recorded for this session. */
+  nextAction?: string;
+  /** What or whom currently blocks this session. */
+  waitingOn?: string;
+  /** Explicit attention categories; prompt/waiting signals are derived separately. */
+  attentionReasons?: SessionAttentionReason[];
   /** Unix timestamp ms when this session was last read by any device */
   lastReadAt?: number;
 }
@@ -600,6 +621,10 @@ export interface SessionIndexEntry {
   isExecuting?: boolean;
   /** Whether there are pending interactive prompts (permissions or questions) waiting for response */
   hasPendingPrompt?: boolean;
+  myNotes?: string;
+  nextAction?: string;
+  waitingOn?: string;
+  attentionReasons?: SessionAttentionReason[];
   /** Current context usage (from /context command for Claude Code) */
   currentContext?: {
     tokens: number;         // Current tokens in context window

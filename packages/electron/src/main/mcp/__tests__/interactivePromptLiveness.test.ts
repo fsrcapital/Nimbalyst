@@ -1,9 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
+  clearLiveRemoteInteractivePrompt,
   clearLiveInteractivePrompt,
   countLiveInteractivePrompts,
+  getLiveRemoteInteractivePrompt,
   hasLiveInteractivePrompt,
   noteLiveInteractivePrompt,
+  noteLiveRemoteInteractivePrompt,
 } from '../tools/interactivePromptLiveness';
 import {
   clearPendingInteractiveWaiter,
@@ -58,5 +61,33 @@ describe('interactivePromptLiveness (NIM-2208)', () => {
       responsePromptIds: ['unmatched-id'],
       pendingWaiterCountForSession: countPendingInteractiveWaiters('s1'),
     })).toBe(true);
+  });
+
+  it('exposes a live Codex AskUserQuestion to remote clients until it settles', () => {
+    const prompt = {
+      id: 'exec-question-1',
+      promptId: 'exec-question-1',
+      promptType: 'ask_user_question_request' as const,
+      createdAt: 1_777_000_000_000,
+      content: {
+        questions: [{
+          header: 'Direction',
+          question: 'What should Codex do?',
+          options: [
+            { label: 'Continue', description: 'Keep working.' },
+            { label: 'Stop', description: 'Wait for review.' },
+          ],
+          multiSelect: false,
+        }],
+      },
+    };
+
+    noteLiveRemoteInteractivePrompt('s1', prompt);
+
+    expect(getLiveRemoteInteractivePrompt('s1')).toEqual(prompt);
+    expect(getLiveRemoteInteractivePrompt('s2')).toBeNull();
+
+    clearLiveRemoteInteractivePrompt('s1', prompt.promptId);
+    expect(getLiveRemoteInteractivePrompt('s1')).toBeNull();
   });
 });

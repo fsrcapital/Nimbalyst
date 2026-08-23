@@ -68,7 +68,7 @@ interface DeviceInfo {
 // NOTE: Props have been removed - SyncPanel now uses Jotai atoms directly.
 // The component is self-contained and doesn't need external config management.
 
-export type PersonalSyncSection = 'accounts' | 'mobile' | 'devices';
+export type PersonalSyncSection = 'accounts' | 'mobile' | 'web' | 'devices';
 
 export function SyncPanel({ section }: { section: PersonalSyncSection }) {
   const posthog = usePostHog();
@@ -92,7 +92,12 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [showQRModal, setShowQRModal] = useState(false);
+  const [pairingTarget, setPairingTarget] = useState<'ios' | 'web'>('ios');
   const [pairError, setPairError] = useState<string | null>(null);
+  const [webAccess, setWebAccess] = useState<{
+    enabledProjects: string[];
+    preventSleepMode: 'off' | 'always' | 'pluggedIn';
+  }>({ enabledProjects: [], preventSleepMode: 'off' });
   const [connectedDevices, setConnectedDevices] = useState<DeviceInfo[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [devicesError, setDevicesError] = useState<string | null>(null);
@@ -137,7 +142,8 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
   const isStytchAvailable = !!window.electronAPI?.stytch;
 
   const enabledProjects = config.enabledProjects ?? [];
-  const enabledProjectCount = enabledProjects.length;
+  const sectionEnabledProjects = section === 'web' ? webAccess.enabledProjects : enabledProjects;
+  const enabledProjectCount = sectionEnabledProjects.length;
 
   // One stored account is the common case, and it has nothing to choose between.
   // The row then drops every comparison affordance (avatar, sync-account
@@ -145,9 +151,6 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
   // "Signed in as ..." line. Nothing is removed — the multi-account chrome comes
   // back the moment a second account exists.
   const isSingleAccount = allAccounts.length === 1;
-
-  // Derive whether sync is effectively active (has projects selected)
-  const isSyncActive = config.enabled && enabledProjectCount > 0;
 
   // Load accounts list
   const loadAccounts = async () => {
@@ -181,6 +184,27 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
     }
     loadProjects();
   }, []);
+
+  useEffect(() => {
+    if (section !== 'web') return;
+    let cancelled = false;
+    void window.electronAPI.invoke('web-app:get-access')
+      .then((access) => {
+        if (cancelled) return;
+        setWebAccess({
+          enabledProjects: Array.isArray(access?.enabledProjects) ? access.enabledProjects : [],
+          preventSleepMode: access?.preventSleepMode === 'always' || access?.preventSleepMode === 'pluggedIn'
+            ? access.preventSleepMode
+            : 'off',
+        });
+      })
+      .catch((error) => {
+        if (!cancelled) setPairError(`Could not load Web App access: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [section]);
 
   // Load connected devices when sync is enabled
   const loadDevices = async () => {
@@ -280,6 +304,25 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
     // the toggle take effect (or an error if it never does).
     for (const path of docSyncTurnedOn) {
       void pollDocSyncUntilConnected(path);
+    }
+  };
+
+  const applyWebAppAccess = async (projectPaths: string[], enabled: boolean) => {
+    const previous = webAccess;
+    const nextSet = new Set(previous.enabledProjects);
+    for (const projectPath of projectPaths) {
+      if (enabled) nextSet.add(projectPath);
+      else nextSet.delete(projectPath);
+    }
+    const next = { ...previous, enabledProjects: Array.from(nextSet) };
+    setWebAccess(next);
+    setPairError(null);
+    try {
+      const result = await window.electronAPI.invoke('web-app:set-project-selection', next.enabledProjects);
+      if (result?.success === false) throw new Error(result.error ?? 'Web App access could not be saved.');
+    } catch (error) {
+      setWebAccess(previous);
+      setPairError(`Could not save Web App access: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
@@ -456,14 +499,16 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
 
   const allProjectPaths = projects.map((project) => project.path);
   const docSyncEnabledProjects = config.docSyncEnabledProjects ?? [];
-  const mobileSelection = selectionState(enabledProjects, allProjectPaths);
-  const sectionClass = (target: PersonalSyncSection) =>
-    section === target ? '' : 'hidden';
+  const mobileSelection = selectionState(sectionEnabledProjects, allProjectPaths);
+  const sectionClass = (...targets: PersonalSyncSection[]) =>
+    targets.includes(section) ? '' : 'hidden';
   const heading = section === 'accounts'
     ? ['Accounts', 'Manage signed-in personal accounts and choose the one used for personal/mobile sync.']
     : section === 'devices'
       ? ['Devices', 'View devices paired to the active personal sync account.']
-      : ['Mobile App', 'Pair your phone and choose which projects it can reach. Personal sync stays zero-knowledge encrypted.'];
+      : section === 'web'
+        ? ['Web App', 'Pair the installable browser app for private access from iPhone, iPad, Android, or another computer.']
+        : ['Mobile App', 'Pair the native iOS app and choose which projects it can reach. Personal sync stays zero-knowledge encrypted.'];
 
   return (
     <div className="personal-sync-panel provider-panel flex flex-col" data-component="SyncPanel" data-testid={`personal-sync-${section}`}>
@@ -711,6 +756,7 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
               {/* Pair Device button - right side of card */}
               <button
                   className="self-center flex flex-col items-center gap-1.5 px-4 py-2.5 bg-nim-primary border-none rounded-lg text-nim-on-primary text-[14px] font-medium cursor-pointer hover:bg-nim-primary-hover disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+                  aria-label="Pair iPhone"
                   onClick={() => {
                     if (enabledProjectCount === 0) {
                       setPairError('Enable at least one project to sync before pairing your device.');
@@ -718,6 +764,7 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
                     }
                     setPairError(null);
                     posthog?.capture('sync_qr_pairing_opened');
+                    setPairingTarget('ios');
                     setShowQRModal(true);
                   }}
                   disabled={!effectiveServerUrl}
@@ -731,33 +778,85 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
                   <rect x="14" y="18" width="3" height="3" />
                   <rect x="18" y="18" width="3" height="3" />
                 </svg>
-                Pair Device
+                Pair iPhone
               </button>
             </div>
           </div>
       )}
+      {/* Web App pairing stays separate from the native iOS flow. */}
+      {section === 'web' && (
+        <div className={`sync-web-section provider-panel-section py-4 mb-4 border-b border-[var(--nim-border)] last:border-b-0 last:mb-0 last:pb-0 ${sectionClass('web')}`}>
+          <h4 className="provider-panel-section-title text-[15px] font-semibold mb-3 text-[var(--nim-text)]">Pair the Web App</h4>
+          <div className="flex gap-3.5 p-3.5 bg-nim-secondary rounded-lg">
+            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-violet-500 to-violet-700 flex items-center justify-center shrink-0">
+              <MaterialSymbol icon="language" size={24} className="text-white" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-[13px] font-semibold text-nim mb-0.5">Nimbalyst Command Center</div>
+              <div className="text-[11px] text-nim-faint mb-2">
+                Install from your browser and drive desktop agent sessions remotely
+              </div>
+              <button
+                type="button"
+                onClick={() => window.electronAPI.openExternal('https://nimbalyst-command-center.fsrcapital.chatgpt.site')}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-nim-tertiary rounded text-[11px] font-medium text-nim border border-nim cursor-pointer hover:bg-nim-hover"
+              >
+                Open Web App
+              </button>
+            </div>
+            <button
+              type="button"
+              aria-label="Pair Web App"
+              className="self-center flex flex-col items-center gap-1.5 px-4 py-2.5 bg-nim-primary border-none rounded-lg text-nim-on-primary text-[14px] font-medium cursor-pointer hover:bg-nim-primary-hover disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+              onClick={() => {
+                if (enabledProjectCount === 0) {
+                  setPairError('Enable at least one project before pairing the Web App.');
+                  return;
+                }
+                setPairError(null);
+                posthog?.capture('web_app_qr_pairing_opened');
+                setPairingTarget('web');
+                setShowQRModal(true);
+              }}
+              disabled={!effectiveServerUrl}
+            >
+              <MaterialSymbol icon="qr_code_2" size={20} />
+              Pair Web App
+            </button>
+          </div>
+        </div>
+      )}
       {pairError && (
-          <p className={`sync-mobile-section mt-2 text-[12px] text-nim-error ${sectionClass('mobile')}`}>
+          <p className={`sync-pairing-error mt-2 text-[12px] text-nim-error ${sectionClass('mobile', 'web')}`}>
             {pairError}
           </p>
       )}
 
       {/* Prevent sleep mode selector */}
-      {config.enabled && (
-        <div className={`sync-mobile-section provider-panel-section py-4 mb-4 border-b border-[var(--nim-border)] last:border-b-0 last:mb-0 last:pb-0 ${sectionClass('mobile')}`}>
+      {(section === 'web' ? enabledProjectCount > 0 : config.enabled) && (
+        <div className={`sync-mobile-section provider-panel-section py-4 mb-4 border-b border-[var(--nim-border)] last:border-b-0 last:mb-0 last:pb-0 ${sectionClass('mobile', 'web')}`}>
           <div className="flex items-center justify-between">
             <div className="flex-1 mr-3">
-              <h4 className="text-[13px] font-medium text-nim m-0">Prevent sleep while syncing</h4>
+              <h4 className="text-[13px] font-medium text-nim m-0">
+                {section === 'web' ? 'Prevent sleep while remotely accessible' : 'Prevent sleep while syncing'}
+              </h4>
               <p className="text-[11px] text-nim-muted mt-0.5 mb-0">
                 Keeps your computer awake so you can send prompts from your phone. Display can still turn off.
               </p>
             </div>
             <select
-              value={config.preventSleepMode ?? (config.preventSleepWhenSyncing ? 'always' : 'off')}
+              value={section === 'web'
+                ? webAccess.preventSleepMode
+                : config.preventSleepMode ?? (config.preventSleepWhenSyncing ? 'always' : 'off')}
               onChange={(e) => {
                 const mode = e.target.value as 'off' | 'always' | 'pluggedIn';
-                updateConfig({ preventSleepMode: mode, preventSleepWhenSyncing: undefined });
-                window.electronAPI.invoke('sync:set-prevent-sleep', mode);
+                if (section === 'web') {
+                  setWebAccess((current) => ({ ...current, preventSleepMode: mode }));
+                  window.electronAPI.invoke('web-app:set-prevent-sleep', mode);
+                } else {
+                  updateConfig({ preventSleepMode: mode, preventSleepWhenSyncing: undefined });
+                  window.electronAPI.invoke('sync:set-prevent-sleep', mode);
+                }
               }}
               className="bg-nim-secondary border border-nim rounded px-2 py-1 text-[12px] text-nim cursor-pointer shrink-0"
             >
@@ -766,25 +865,35 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
               <option value="pluggedIn">When plugged in</option>
             </select>
           </div>
-          {(config.preventSleepMode ?? (config.preventSleepWhenSyncing ? 'always' : 'off')) === 'off' && enabledProjectCount > 0 && (
+          {(section === 'web'
+            ? webAccess.preventSleepMode
+            : config.preventSleepMode ?? (config.preventSleepWhenSyncing ? 'always' : 'off')) === 'off' && enabledProjectCount > 0 && (
             <div className="flex items-center gap-2 mt-2 p-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-[11px] text-amber-500">
               <svg className="shrink-0" width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                 <path d="M8 1a7 7 0 100 14A7 7 0 008 1zM7 5a1 1 0 112 0v3a1 1 0 11-2 0V5zm1 7a1 1 0 100-2 1 1 0 000 2z" />
               </svg>
-              <span>Your computer may sleep and disconnect from sync. Enable sleep prevention to keep the connection alive.</span>
+              <span>
+                {section === 'web'
+                  ? 'Your computer may sleep and make the Web App unreachable. Enable sleep prevention to keep remote access available.'
+                  : 'Your computer may sleep and disconnect from sync. Enable sleep prevention to keep the connection alive.'}
+              </span>
             </div>
           )}
         </div>
       )}
 
       {/* Projects on mobile: one multi-select list, bulk-selectable */}
-      <div className={`sync-mobile-section provider-panel-section py-4 mb-4 border-b border-[var(--nim-border)] last:border-b-0 last:mb-0 last:pb-0 ${sectionClass('mobile')}`}>
+      <div className={`sync-mobile-section provider-panel-section py-4 mb-4 border-b border-[var(--nim-border)] last:border-b-0 last:mb-0 last:pb-0 ${sectionClass('mobile', 'web')}`}>
         <div className="flex items-center justify-between mb-1">
-          <h4 className="provider-panel-section-title text-[15px] font-semibold text-[var(--nim-text)] m-0">Projects accessible on mobile</h4>
+          <h4 className="provider-panel-section-title text-[15px] font-semibold text-[var(--nim-text)] m-0">
+            {section === 'web' ? 'Projects accessible in Web App' : 'Projects accessible on mobile'}
+          </h4>
           {projects.length > 0 && (
             <button
               type="button"
-              onClick={() => applyProjectSync('mobile', allProjectPaths, mobileSelection !== 'all')}
+              onClick={() => section === 'web'
+                ? applyWebAppAccess(allProjectPaths, mobileSelection !== 'all')
+                : applyProjectSync('mobile', allProjectPaths, mobileSelection !== 'all')}
               className="rounded border border-nim bg-transparent px-2 py-0.5 text-[11px] text-nim-muted hover:bg-nim-hover hover:text-nim"
               data-testid="sync-project-select-all"
             >
@@ -796,7 +905,7 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
           {enabledProjectCount === 0
             ? 'No projects selected.'
             : `${enabledProjectCount} of ${projects.length} selected.`}
-          {isAlpha && ' Docs also syncs each project\u2019s .md files.'}
+          {section === 'mobile' && isAlpha && ' Docs also syncs each project\u2019s .md files.'}
         </p>
 
         {projects.length === 0 ? (
@@ -806,7 +915,7 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
         ) : (
           <ul className="sync-project-select-list m-0 list-none overflow-hidden rounded-lg bg-nim-secondary p-0" data-testid="sync-project-select-list">
             {projects.map((project) => {
-              const mobileEnabled = enabledProjects.includes(project.path);
+              const mobileEnabled = sectionEnabledProjects.includes(project.path);
               const docSyncEnabled = docSyncEnabledProjects.includes(project.path);
               const status = docSyncStatus[project.path];
               return (
@@ -816,13 +925,17 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
                       <input
                         type="checkbox"
                         checked={mobileEnabled}
-                        onChange={(event) => applyProjectSync('mobile', [project.path], event.target.checked)}
+                        onChange={(event) => section === 'web'
+                          ? applyWebAppAccess([project.path], event.target.checked)
+                          : applyProjectSync('mobile', [project.path], event.target.checked)}
                         className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-[var(--nim-primary)]"
-                        aria-label={`Sync ${project.name} to mobile`}
+                        aria-label={section === 'web'
+                          ? `Allow ${project.name} in Web App`
+                          : `Sync ${project.name} to mobile`}
                       />
                       <span className="truncate text-[13px] text-nim">{project.name}</span>
                     </label>
-                    {isAlpha && docSyncEnabled && status && (
+                    {section === 'mobile' && isAlpha && docSyncEnabled && status && (
                       status.pending ? (
                         <span className="flex shrink-0 items-center gap-1 text-[10px] text-nim-faint" title="Starting document sync">
                           <MaterialSymbol icon="progress_activity" size={12} className="animate-spin" />
@@ -848,7 +961,7 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
                         </span>
                       )
                     )}
-                    {isAlpha && (
+                    {section === 'mobile' && isAlpha && (
                       <label className="flex shrink-0 cursor-pointer items-center gap-1" title="Sync .md files to mobile">
                         <input
                           type="checkbox"
@@ -862,7 +975,7 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
                       </label>
                     )}
                   </div>
-                  {isAlpha && status?.error && (
+                  {section === 'mobile' && isAlpha && status?.error && (
                     <p className="m-0 px-2.5 pb-1.5 text-[10px] text-nim-error">{status.error}</p>
                   )}
                 </li>
@@ -871,8 +984,8 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
           </ul>
         )}
 
-        {/* Idle timeout */}
-        <div className="flex items-center justify-between mt-2">
+        {/* Idle timeout belongs to upstream mobile notifications only. */}
+        {section === 'mobile' && <div className="flex items-center justify-between mt-2">
           <span className="text-[11px] text-nim-faint">Push notification delay</span>
           <select
             value={config.idleTimeoutMinutes ?? 5}
@@ -886,7 +999,7 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
             <option value={15}>15 min</option>
             <option value={30}>30 min</option>
           </select>
-        </div>
+        </div>}
       </div>
 
       {/* Paired Devices */}
@@ -934,7 +1047,7 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
       </div>
 
       {/* Encryption footer */}
-      <div className={`sync-mobile-section provider-panel-section py-4 ${sectionClass('mobile')}`}>
+      <div className={`sync-mobile-section provider-panel-section py-4 ${sectionClass('mobile', 'web')}`}>
         <div className="p-3.5 bg-nim-secondary border border-nim rounded-lg">
           <div className="flex items-center gap-2 mb-2">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--nim-success, #22c55e)" strokeWidth="2" className="shrink-0">
@@ -942,16 +1055,28 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
               <path d="M7 11V7a5 5 0 0110 0v4" />
             </svg>
             <span className="text-[13px] font-semibold text-nim-success">
-              End-to-End Encryption
+              {section === 'web' ? 'Private Direct Connection' : 'End-to-End Encryption'}
             </span>
           </div>
           <p className="m-0 mb-2 text-[12px] text-nim-muted leading-relaxed">
-            The QR code securely transfers your encryption key directly between devices.
+            {section === 'web'
+              ? 'The QR transfers a private desktop gateway credential directly to your browser.'
+              : 'The QR code securely transfers your encryption key directly between devices.'}
           </p>
           <ul className="m-0 pl-5 text-[12px] text-nim leading-7">
-            <li>Your encryption keys never touch our servers</li>
-            <li>Only your devices can decrypt your data</li>
-            <li>Sign in with the same account on both devices</li>
+            {section === 'web' ? (
+              <>
+                <li>No Nimbalyst account or upstream sync is required</li>
+                <li>Only explicitly selected projects are reachable</li>
+                <li>Your desktop remains behind your private HTTPS network</li>
+              </>
+            ) : (
+              <>
+                <li>Your encryption keys never touch our servers</li>
+                <li>Only your devices can decrypt your data</li>
+                <li>Sign in with the same account on both devices</li>
+              </>
+            )}
           </ul>
         </div>
       </div>
@@ -1022,13 +1147,21 @@ export function SyncPanel({ section }: { section: PersonalSyncSection }) {
 
       {/* Modals */}
       <QRPairingModal
-        isOpen={section !== 'accounts' && section !== 'devices' && showQRModal}
+        isOpen={(section === 'mobile' || section === 'web') && showQRModal}
         onClose={() => setShowQRModal(false)}
         serverUrl={effectiveServerUrl}
-        preventSleepMode={config.preventSleepMode ?? (config.preventSleepWhenSyncing ? 'always' : 'off')}
+        pairingTarget={pairingTarget}
+        preventSleepMode={section === 'web'
+          ? webAccess.preventSleepMode
+          : config.preventSleepMode ?? (config.preventSleepWhenSyncing ? 'always' : 'off')}
         onPreventSleepModeChange={(mode) => {
-          updateConfig({ preventSleepMode: mode, preventSleepWhenSyncing: undefined });
-          window.electronAPI.invoke('sync:set-prevent-sleep', mode);
+          if (section === 'web') {
+            setWebAccess((current) => ({ ...current, preventSleepMode: mode }));
+            window.electronAPI.invoke('web-app:set-prevent-sleep', mode);
+          } else {
+            updateConfig({ preventSleepMode: mode, preventSleepWhenSyncing: undefined });
+            window.electronAPI.invoke('sync:set-prevent-sleep', mode);
+          }
         }}
       />
     </div>

@@ -58,6 +58,15 @@ export {
   filterSessionsForPersonalSync,
   isSessionEligibleForPersonalSync,
 } from './types';
+export {
+  normalizeSessionWorkflowMetadata,
+  resolveSessionAttention,
+} from '../ai/sessionWorkflow';
+export type {
+  SessionAttentionReason,
+  SessionWorkflowMetadata,
+  ResolvedSessionAttention,
+} from '../ai/sessionWorkflow';
 
 export { createCollabV3Sync } from './CollabV3Sync';
 export { createExtensionAwarenessBridge } from './extensionAwarenessBridge';

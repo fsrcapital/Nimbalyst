@@ -30,6 +30,7 @@ export type ApplicationSettingsCategory =
 export type AccountSettingsCategory =
   | 'account'
   | 'account-mobile'
+  | 'account-web'
   | 'account-devices'
   | 'account-shared-links';
 
@@ -155,6 +156,7 @@ const builtinSettingsRouteDefinitions: readonly Omit<BuiltinSettingsRoute, 'sour
 
   { id: 'account', scope: 'account', group: 'Account', label: 'Accounts', icon: 'account_circle' },
   { id: 'account-mobile', scope: 'account', group: 'Account', label: 'Mobile App', icon: 'smartphone' },
+  { id: 'account-web', scope: 'account', group: 'Account', label: 'Web App', icon: 'language' },
   { id: 'account-devices', scope: 'account', group: 'Account', label: 'Devices', icon: 'devices' },
   { id: 'account-shared-links', scope: 'account', group: 'Account', label: 'Shared Links', icon: 'link' },
 

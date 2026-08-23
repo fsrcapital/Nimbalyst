@@ -46,6 +46,7 @@ export interface WorktreeRecord {
   name: string;
   displayName?: string | null;
   path: string;
+  branch?: string;
   isPinned: boolean;
 }
 

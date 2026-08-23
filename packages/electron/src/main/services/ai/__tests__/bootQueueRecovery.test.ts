@@ -1,36 +1,33 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest';
-import { driveStrandedQueuesOnBoot } from '../bootQueueRecovery';
+import {
+  driveStrandedQueuesOnBoot,
+  RESTARTED_PROMPT_ERROR,
+} from '../bootQueueRecovery';
 
-type DepOverrides = Partial<Omit<Parameters<typeof driveStrandedQueuesOnBoot>[0], 'requestDrive'>>;
+type DepOverrides = Partial<Parameters<typeof driveStrandedQueuesOnBoot>[0]>;
 
 function createDeps(overrides: DepOverrides = {}) {
   return {
     listSessionIdsWithPending: vi.fn(async () => [] as string[]),
-    getWorkspacePath: vi.fn(async () => '/ws' as string | null | undefined),
+    failPending: vi.fn(async () => 1),
     logInfo: vi.fn(),
-    logWarn: vi.fn(),
     ...overrides,
-    requestDrive: vi.fn<(sessionId: string, workspacePath: string) => void>(),
   };
 }
 
 describe('driveStrandedQueuesOnBoot', () => {
-  it('drives each stranded session exactly once', async () => {
+  it('quarantines each pre-restart queue instead of executing it', async () => {
     const deps = createDeps({
       listSessionIdsWithPending: vi.fn(async () => ['s1', 's2', 's3']),
-      getWorkspacePath: vi.fn(async (sessionId: string) => `/ws/${sessionId}`),
     });
 
-    const driven = await driveStrandedQueuesOnBoot(deps);
+    const quarantined = await driveStrandedQueuesOnBoot(deps);
 
-    expect(driven).toBe(3);
-    expect(deps.requestDrive).toHaveBeenCalledTimes(3);
-    expect(deps.requestDrive.mock.calls).toEqual([
-      ['s1', '/ws/s1'],
-      ['s2', '/ws/s2'],
-      ['s3', '/ws/s3'],
-    ]);
+    expect(quarantined).toBe(3);
+    expect(deps.failPending).toHaveBeenNthCalledWith(1, 's1', RESTARTED_PROMPT_ERROR);
+    expect(deps.failPending).toHaveBeenNthCalledWith(2, 's2', RESTARTED_PROMPT_ERROR);
+    expect(deps.failPending).toHaveBeenNthCalledWith(3, 's3', RESTARTED_PROMPT_ERROR);
   });
 
   it('drives nothing when the boot sweep left no pending rows', async () => {
@@ -40,18 +37,17 @@ describe('driveStrandedQueuesOnBoot', () => {
     const deps = createDeps();
 
     expect(await driveStrandedQueuesOnBoot(deps)).toBe(0);
-    expect(deps.requestDrive).not.toHaveBeenCalled();
+    expect(deps.failPending).not.toHaveBeenCalled();
     expect(deps.logInfo).not.toHaveBeenCalled();
   });
 
-  it('skips a session with no workspace path instead of guessing a window', async () => {
+  it('counts only sessions whose pending rows were actually quarantined', async () => {
     const deps = createDeps({
-      listSessionIdsWithPending: vi.fn(async () => ['orphan', 'ok']),
-      getWorkspacePath: vi.fn(async (sessionId: string) => (sessionId === 'ok' ? '/ws' : null)),
+      listSessionIdsWithPending: vi.fn(async () => ['already-claimed', 'stale']),
+      failPending: vi.fn(async (sessionId: string) => sessionId === 'stale' ? 1 : 0),
     });
 
     expect(await driveStrandedQueuesOnBoot(deps)).toBe(1);
-    expect(deps.requestDrive).toHaveBeenCalledExactlyOnceWith('ok', '/ws');
-    expect(deps.logWarn).toHaveBeenCalledOnce();
+    expect(deps.failPending).toHaveBeenCalledTimes(2);
   });
 });

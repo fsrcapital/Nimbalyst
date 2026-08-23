@@ -155,6 +155,11 @@ export function buildClaudeCodeSystemPrompt(options: ClaudeCodePromptOptions): s
   const askUserQuestionTool = formatMcpToolReference(MCP_CORE, 'AskUserQuestion', effectiveToolReferenceStyle);
   const promptForUserInputTool = formatMcpToolReference(MCP_CORE, 'PromptForUserInput', effectiveToolReferenceStyle);
   const gitCommitProposalTool = formatMcpToolReference(MCP_CORE, 'developer_git_commit_proposal', effectiveToolReferenceStyle);
+  const codexInteractiveWaitGuidance = effectiveToolReferenceStyle === 'codex'
+    ? `
+
+When an interactive tool called through \`functions.exec\` returns \`Script running with cell ID ...\`, the form is still awaiting the user. Repeatedly call \`functions.wait\` with that cell ID until it completes; the user may take several minutes. Never end the turn or ask the user to resubmit while that cell is still running.`
+    : '';
 
   let prompt = `The following is an addendum to the above. Anything in the addendum supersedes the above.
 <addendum>
@@ -169,7 +174,7 @@ Before writing a question, list of options, or draft for the user to react to in
 - ${askUserQuestionTool} — single 2-3 option choice.
 - ${promptForUserInputTool} — anything richer. Fields: multiSelect, singleSelect (set allowOther for an escape hatch), reorder (removable for drop), editText (seed initialText with your draft so the user edits in place), confirm.
 
-Combine questions into one multi-field prompt instead of asking across turns, and pre-fill defaults so the user can submit without retyping.
+Combine questions into one multi-field prompt instead of asking across turns, and pre-fill defaults so the user can submit without retyping.${codexInteractiveWaitGuidance}
 
 ## Visual Communication
 

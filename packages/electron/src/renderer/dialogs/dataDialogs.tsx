@@ -99,8 +99,9 @@ function SessionImportWrapper({
   onClose: () => void;
   data: SessionImportData;
 }) {
-  const handleImport = async (sessionIds: string[]) => {
-    const result = await window.electronAPI?.invoke('claude-code:sync-sessions', {
+  const handleImport = async (provider: 'claude-code' | 'openai-codex', sessionIds: string[]) => {
+    const channel = provider === 'openai-codex' ? 'codex:sync-sessions' : 'claude-code:sync-sessions';
+    const result = await window.electronAPI?.invoke(channel, {
       sessionIds,
       workspacePath: data.workspacePath,
     });

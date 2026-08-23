@@ -13,6 +13,8 @@ vi.mock('jotai', () => ({
 vi.mock('@nimbalyst/runtime', () => ({ MaterialSymbol: () => null, ProviderIcon: () => null }));
 vi.mock('../../../store', () => ({
   sessionOrChildProcessingAtom: () => ({}),
+  sessionProcessingAtom: () => ({}),
+  sessionActiveSubagentCountAtom: () => ({}),
   sessionUnreadAtom: () => ({}),
   sessionPendingPromptAtom: () => ({}),
   sessionHasPendingInteractivePromptAtom: () => ({}),
@@ -25,6 +27,7 @@ vi.mock('../../../store', () => ({
 vi.mock('../../../store/atoms/sessions', () => ({ convertToWorkstreamAtom: () => ({}) }));
 vi.mock('../../../store/atoms/teamInbox', () => ({ sessionAgentWakePendingAtom: () => ({}) }));
 vi.mock('../SessionContextMenu', () => ({ SessionContextMenu: () => null }));
+vi.mock('../SessionWorkflowPopover', () => ({ SessionWorkflowPopover: () => null }));
 
 import { SessionListItem } from '../SessionListItem';
 
