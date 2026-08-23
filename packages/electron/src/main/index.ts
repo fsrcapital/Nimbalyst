@@ -435,8 +435,11 @@ async function checkForRestartContinuation(aiService: AIService): Promise<void> 
 
         logger.main.info(`[RestartContinuation] Found continuation for ${sessionIds.length} session(s), queueing continuation prompts`);
 
-        // Queue continuation prompts for all sessions
+        // Queue continuation prompts for all sessions. These are the one
+        // intentional exception to boot quarantine: /restart explicitly asked
+        // Nimbalyst to continue the focused running session after relaunch.
         const { getQueuedPromptsStore } = await import('./services/RepositoryManager');
+        const { AISessionsRepository } = await import('@nimbalyst/runtime/storage/repositories/AISessionsRepository');
         const queuedPromptsStore = getQueuedPromptsStore();
 
         let successCount = 0;
@@ -444,11 +447,17 @@ async function checkForRestartContinuation(aiService: AIService): Promise<void> 
 
         for (const sessionId of sessionIds) {
             try {
+                const session = await AISessionsRepository.get(sessionId);
+                if (!session?.workspacePath) {
+                    throw new Error(`Session ${sessionId} has no workspace path for restart continuation`);
+                }
                 await queuedPromptsStore.create({
                     id: `restart-continuation-${sessionId}-${Date.now()}`,
                     sessionId,
-                    prompt: 'Nimbalyst has restarted. Please continue with your work.'
+                    prompt: 'Nimbalyst has restarted. Please continue with your work.',
+                    documentContext: { promptOrigin: 'restart_continuation' },
                 });
+                aiService.requestQueueDrive(sessionId, session.workspacePath, 'restart-continuation');
                 successCount++;
                 logger.main.info(`[RestartContinuation] Queued continuation prompt for session ${sessionId}`);
             } catch (error) {
@@ -2665,30 +2674,28 @@ app.whenReady().then(async () => {
       logger.main.error('[Main] Boot sweep failed:', sweepErr);
     }
 
-    // Check for pending restart continuations and queue continuation prompts
-    await checkForRestartContinuation(aiService);
-
-    // The boot sweep normalizes rows to 'pending' but claims none of them, and
-    // restart continuation only queues — before this, both sat there until the
-    // user happened to open the session's transcript (#962). Hand every session
-    // with pending rows to the queue driver, which defers until a window for
-    // that workspace exists. Exactly-once is still the store's atomic claim.
+    // The boot sweep normalizes undelivered rows to 'pending'. Never hand those
+    // pre-restart prompts to the queue driver: a no-window retry would submit
+    // them as soon as the user later opened the workspace, turning a read-only
+    // session view into unexpected model usage. Keep the rows in history as
+    // failed so the user must explicitly send again.
     try {
       const { getQueuedPromptsStore } = await import('./services/RepositoryManager');
       const { driveStrandedQueuesOnBoot } = await import('./services/ai/bootQueueRecovery');
-      const { AISessionsRepository } = await import('@nimbalyst/runtime/storage/repositories/AISessionsRepository');
-      const bootAiService = aiService;
       await driveStrandedQueuesOnBoot({
         listSessionIdsWithPending: () => getQueuedPromptsStore().listSessionIdsWithPending(),
-        getWorkspacePath: async (sessionId) => (await AISessionsRepository.get(sessionId))?.workspacePath,
-        requestDrive: (sessionId, workspacePath) =>
-          bootAiService.requestQueueDrive(sessionId, workspacePath, 'boot-recovery'),
+        failPending: (sessionId, errorMessage) =>
+          getQueuedPromptsStore().failAllPendingForSession(sessionId, errorMessage),
         logInfo: (message) => logger.main.info(message),
-        logWarn: (message) => logger.main.warn(message),
       });
     } catch (recoveryErr) {
       logger.main.error('[Main] Boot queue recovery failed:', recoveryErr);
     }
+
+    // /restart is an explicit request to continue the focused running session.
+    // Queue it only after quarantining prompts inherited from the prior app run
+    // so it cannot be mistaken for stale work.
+    await checkForRestartContinuation(aiService);
 
     try {
       await startAgentMentionDispatchService(aiService);
