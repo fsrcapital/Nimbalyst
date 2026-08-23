@@ -1,3 +1,5 @@
+import type { PersonalMemberId } from '@nimbalyst/runtime';
+
 export type WebAppPreventSleepMode = 'off' | 'always' | 'pluggedIn';
 
 export interface WebAppAccessConfig {
@@ -8,7 +10,7 @@ export interface WebAppAccessConfig {
 export interface NativePairingIdentity {
   syncEmail?: string;
   personalOrgId?: string;
-  personalUserId?: string;
+  personalUserId?: PersonalMemberId;
 }
 
 const DEFAULT_WEB_APP_ACCESS: WebAppAccessConfig = {
