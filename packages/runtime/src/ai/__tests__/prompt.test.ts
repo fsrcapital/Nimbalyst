@@ -12,6 +12,8 @@ describe('buildClaudeCodeSystemPrompt', () => {
     expect(prompt).toContain('`PromptForUserInput` (server: `nimbalyst`)');
     expect(prompt).toContain('call an interactive tool instead');
     expect(prompt).toContain('Combine questions into one multi-field prompt');
+    expect(prompt).toContain('Repeatedly call `functions.wait`');
+    expect(prompt).toContain('Never end the turn or ask the user to resubmit while that cell is still running');
   });
 
   it('formats interactive input tool references for claude-style prompts', () => {
@@ -22,6 +24,7 @@ describe('buildClaudeCodeSystemPrompt', () => {
     // Core interactive tools now live on the eager `nimbalyst` server (Phase 2).
     expect(prompt).toContain('`mcp__nimbalyst__AskUserQuestion`');
     expect(prompt).toContain('`mcp__nimbalyst__PromptForUserInput`');
+    expect(prompt).not.toContain('`functions.wait`');
   });
 
   it('includes tracker-references guidance by default', () => {
