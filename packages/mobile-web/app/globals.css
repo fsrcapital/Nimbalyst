@@ -1965,9 +1965,11 @@ textarea:focus-visible {
   to { opacity: 1; transform: scale(1); }
 }
 
-@media (max-width: 1020px) {
+/* iPad landscape: retain all three navigation levels, but reserve most of
+   the viewport for the active session rather than its navigation. */
+@media (min-width: 900px) and (max-width: 1366px) {
   .app-shell {
-    grid-template-columns: 190px minmax(330px, 0.92fr) minmax(380px, 1.08fr);
+    grid-template-columns: 165px minmax(240px, 0.55fr) minmax(0, 1.45fr);
   }
 
   .desktop-connection {
@@ -1975,7 +1977,9 @@ textarea:focus-visible {
   }
 }
 
-@media (max-width: 760px) {
+/* iPad portrait and narrow split-screen use the focused, full-screen session
+   flow, with workspaces and sessions available from the mobile navigation. */
+@media (max-width: 899px) {
   html,
   body {
     background: #0e0e11;
