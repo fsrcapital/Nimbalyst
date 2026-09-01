@@ -145,6 +145,9 @@ import { onWorkspaceWindowAvailable } from '../../window/workspaceWindowAvailabi
 import { dispatchQueuedPromptToClaudeCli } from './claudeCliQueueDispatch';
 import { publishQueuedPromptClaim } from './queuedPromptClaimEvents';
 import { ensureClaudeCliSession, claudeCliSessionSupportsPlugins } from './claudeCliLauncherSingleton';
+import { submitClaudeCliPromptProduction } from './claudeCliSubmitSingleton';
+import { buildClaudeCliAskUserQuestionRecoveryPrompt } from './claudeCliAskUserQuestionRecovery';
+import { broadcastMessageLogged } from './claudeCliUserPromptLog';
 import {
   resolveProviderWorkflowCatalog,
   type ProviderWorkflowCatalog,
@@ -2770,22 +2773,25 @@ export class AIService {
       // the response to the database as a fallback so the MCP server's database polling can find it.
       if (!providerResolved && resolvedSessionId) {
         const { AgentMessagesRepository } = await import('@nimbalyst/runtime/storage/repositories/AgentMessagesRepository');
-        AgentMessagesRepository.create({
-          sessionId: resolvedSessionId,
-          source: 'claude-code',
-          direction: 'output' as const,
-          createdAt: new Date(),
-          content: JSON.stringify({
-            type: 'ask_user_question_response',
-            questionId,
-            answers,
-            cancelled: false,
-            respondedBy: 'desktop',
-            respondedAt: Date.now()
-          })
-        }).catch(err => {
+        try {
+          await AgentMessagesRepository.create({
+            sessionId: resolvedSessionId,
+            source: 'claude-code',
+            direction: 'output' as const,
+            createdAt: new Date(),
+            content: JSON.stringify({
+              type: 'ask_user_question_response',
+              questionId,
+              answers,
+              cancelled: false,
+              respondedBy: 'desktop',
+              respondedAt: Date.now()
+            })
+          });
+          broadcastMessageLogged(resolvedSessionId, session.workspacePath);
+        } catch (err) {
           logger.main.warn(`[AIService] Failed to persist AskUserQuestion response to database: ${err}`);
-        });
+        }
       }
 
       logger.main.info(`[AIService] AskUserQuestion resolution: providerResolved=${providerResolved}, hasMcpWaiter=${hasMcpWaiter}, hasSessionFallbackWaiter=${hasSessionFallbackWaiter}`);
@@ -2817,17 +2823,35 @@ export class AIService {
           cancelled: false,
         });
 
-        // The auto-resume is an in-process recovery: it re-enters the provider
-        // with the answer so the SDK resumes from its stored providerSessionId.
-        // `claude-code-cli` has nothing of the sort to resume -- sendMessageHandler
-        // submits into a live CLI composer, so this would type "[Resuming after
-        // answering a question]" into whatever that terminal is doing now, as if
-        // the user had written it. The answer is already durable: the response row
-        // above settles the waiting MCP handler through its DB poll (see
-        // interactiveToolHandlers), and the tool_result just persisted completes
-        // the widget.
+        // The CLI has no in-process provider waiter after a restart. Recover it
+        // through the same PTY submission rail used by the composer. If the old
+        // CLI process is still displaying the stranded task, interrupt that turn
+        // first so the recovery text is submitted at the main composer instead
+        // of being interpreted as raw task instructions.
         if (session.provider === 'claude-code-cli') {
-          logger.main.info(`[AIService] No live handler for AskUserQuestion on ${session.provider}; leaving the answer for the MCP handler rather than auto-resuming: ${resolvedSessionId}`);
+          const terminalManager = getTerminalSessionManager();
+          if (terminalManager.isTerminalActive(resolvedSessionId)) {
+            await terminalManager.interruptClaudeCliTurn(resolvedSessionId);
+          }
+
+          const ensured = await ensureClaudeCliSession({
+            sessionId: resolvedSessionId,
+            workspacePath: session.workspacePath,
+            model: session.model ?? undefined,
+          });
+          if (!ensured.success) {
+            logger.main.warn(
+              `[AIService] Failed to relaunch Claude CLI for recovered AskUserQuestion ${resolvedSessionId}: ${ensured.error ?? 'unknown error'}`,
+            );
+            return { success: false, error: ensured.error ?? 'Failed to relaunch Claude CLI' };
+          }
+
+          await submitClaudeCliPromptProduction({
+            sessionId: resolvedSessionId,
+            workspacePath: session.workspacePath,
+            prompt: buildClaudeCliAskUserQuestionRecoveryPrompt(answers),
+          });
+          logger.main.info(`[AIService] Recovered orphaned CLI AskUserQuestion: ${resolvedSessionId}`);
           return { success: true };
         }
 

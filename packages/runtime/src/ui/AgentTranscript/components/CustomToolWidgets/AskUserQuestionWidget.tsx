@@ -11,7 +11,10 @@
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useAtom, useAtomValue } from 'jotai';
 import type { CustomToolWidgetProps } from './index';
-import { interactiveWidgetHostAtom } from '../../../../store/atoms/interactiveWidgetHost';
+import {
+  getInteractiveWidgetHost,
+  interactiveWidgetHostAtom,
+} from '../../../../store/atoms/interactiveWidgetHost';
 import {
   askUserQuestionDraftAtom,
   clearAskUserQuestionDraft,
@@ -248,7 +251,12 @@ export const AskUserQuestionWidget: React.FC<CustomToolWidgetProps> = ({
   }
 
   // Get host from atom (set by SessionTranscript)
-  const host = useAtomValue(interactiveWidgetHostAtom(sessionId));
+  // Read the registry imperatively as a fallback. During a renderer restart or
+  // a dual-mounted Files/Agent transition, the host can be registered between
+  // React renders; relying only on the atom leaves a valid restored question's
+  // Submit button disabled until an unrelated render occurs.
+  const host = useAtomValue(interactiveWidgetHostAtom(sessionId))
+    ?? getInteractiveWidgetHost(sessionId);
 
   const questions = parseQuestions(toolCall.arguments);
 
