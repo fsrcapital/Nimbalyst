@@ -31,6 +31,10 @@ function dependencies(): RemoteGatewayDependencies {
     cancelSession: vi.fn(async () => ({ sessionId: 'session-1', success: true })),
     respondToPrompt: vi.fn(async () => ({ sessionId: 'session-1', success: true })),
     updateWorkflow: vi.fn(async () => ({ sessionId: 'session-1', success: true })),
+    getUsage: vi.fn(async () => ({
+      claude: { fiveHour: { utilization: 20, resetsAt: null } },
+      codex: { limits: [] },
+    })),
     getWebPushPublicKey: vi.fn(() => 'vapid-public-key'),
     subscribeWebPush: vi.fn(() => undefined),
     unsubscribeWebPush: vi.fn(() => undefined),
@@ -175,6 +179,25 @@ describe('remote gateway', () => {
       keys: { p256dh: 'key', auth: 'auth' },
       deviceLabel: 'iPhone',
     });
+  });
+
+  it('returns the desktop usage snapshot without requiring workspace access', async () => {
+    const deps = dependencies();
+    const router = createRemoteGatewayRouter(deps);
+
+    await expect(router({
+      method: 'GET',
+      pathname: '/remote/v1/usage',
+      origin: allowedOrigin,
+      token: deriveRemoteGatewayToken(seed),
+    })).resolves.toEqual({
+      status: 200,
+      body: {
+        claude: { fiveHour: { utilization: 20, resetsAt: null } },
+        codex: { limits: [] },
+      },
+    });
+    expect(deps.getUsage).toHaveBeenCalledOnce();
   });
 
   it('projects a bounded transcript without exposing raw tool arguments', () => {

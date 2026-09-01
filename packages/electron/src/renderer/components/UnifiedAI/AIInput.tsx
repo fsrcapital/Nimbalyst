@@ -40,6 +40,7 @@ import { parseMentionTokens } from './commandPills/parseMentionTokens';
 import { HighlightOverlay, type OverlayToken } from './commandPills/HighlightOverlay';
 import { CommandPillPopover } from './commandPills/CommandPillPopover';
 import { canPersistWorkspaceHydratedState } from '../../utils/workspaceHydration';
+import { shouldConsumeTypeaheadEnter } from './aiInputKeyboard';
 
 export interface AIInputRef {
   focus: () => void;
@@ -811,6 +812,11 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
       const currentOptions = typeaheadMatch?.trigger === '@@' ? sessionMentionOptions
         : typeaheadMatch?.trigger === '@' ? fileMentionOptions
         : slashCommandOptions;
+      const consumeTypeaheadEnter = shouldConsumeTypeaheadEnter(
+        Boolean(typeaheadMatch),
+        currentOptions.length,
+        Boolean(selectedOption),
+      );
 
       // Open the model picker without moving to the mouse. The picker itself
       // takes focus on the current model so Arrow keys and Enter work at once.
@@ -847,12 +853,17 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
         }
 
         if (e.key === 'Enter' || e.key === 'Tab') {
-          e.preventDefault();
-          // Use selectedOption which is kept in sync with visual order by GenericTypeahead
-          if (selectedOption) {
+          // Use selectedOption which is kept in sync with visual order by GenericTypeahead.
+          // If it has not arrived yet, let Enter continue to the normal send
+          // path instead of swallowing the user's message.
+          if (consumeTypeaheadEnter && selectedOption) {
+            e.preventDefault();
             handleTypeaheadSelect(selectedOption);
+            return;
           }
-          return;
+          if (e.key === 'Tab') {
+            e.preventDefault();
+          }
         }
 
         if (e.key === 'Escape') {
@@ -992,7 +1003,9 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
 
       // Queue on Cmd+Shift+Enter (if loading and queue handler exists)
       // Allow queueing when typeahead has no matching options (dropdown not visible)
-      const isTypeaheadVisible = typeaheadMatch && currentOptions.length > 0;
+      const isTypeaheadVisible = e.key === 'Enter'
+        ? consumeTypeaheadEnter
+        : Boolean(typeaheadMatch && currentOptions.length > 0);
       if (e.key === 'Enter' && e.shiftKey && (e.metaKey || e.ctrlKey) && !isTypeaheadVisible) {
         e.preventDefault();
         if (value.trim() && !disabled && isLoading && onQueue) {

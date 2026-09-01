@@ -285,18 +285,21 @@ export async function handleAskUserQuestion(
     });
   }
 
-  // NIM-806: we deliberately do NOT persist a synthetic nimbalyst_tool_use row
-  // here. The proxy observation bridge already persists the CLI's whole assistant
-  // turn (source 'claude-code') INCLUDING this AskUserQuestion tool_use block, so
-  // ClaudeCodeRawParser renders the answerable widget from it (keyed by the same
-  // claudecode/toolUseId == questionId, so the answer still reaches our response
-  // channel). Writing a second synthetic row caused an ordering inversion — it
-  // lands at tool-call time, ~26ms BEFORE the proxy turn's explanatory text
-  // (persisted at message_stop) — so the widget rendered ABOVE the text that
-  // motivates it, plus a duplicate question card. The settle still writes the
-  // synthetic tool_result (below) to flip the widget to answered. `isCliSession`
-  // is still needed by the settle path (CLI defers turn-state to the PID watcher).
+  // The external CLI can block before proxy observation writes its assembled
+  // assistant turn. Persist the prompt immediately so the durable transcript
+  // always has an answerable widget, including after a renderer remount or a
+  // missed proxy observation. A later proxy turn reuses the same tool-use id and
+  // is deduplicated by ClaudeCodeRawParser.
   const isCliSession = await isClaudeCliSession(sessionId);
+  if (isCliSession && sessionId) {
+    await persistInteractivePromptToolUse({
+      sessionId,
+      toolUseId: questionId,
+      toolName: 'AskUserQuestion',
+      input: { questions: normalizedQuestions },
+    });
+    broadcastMessageLogged(sessionId, '');
+  }
 
   // NIM-850: drive the pending-interactive-prompt flag from the explicit prompt
   // lifecycle (mirrors PromptForUserInput's ai:requestUserInput and the SDK path),
@@ -1589,15 +1592,20 @@ export async function handleRequestUserInput(
     void setSessionPendingPrompt(sessionId, true);
   }
 
-  // NIM-806: do NOT persist a synthetic nimbalyst_tool_use here (same reasoning
-  // as handleAskUserQuestion). The proxy observation bridge already persists the
-  // CLI's assistant turn containing this PromptForUserInput tool_use block (full
-  // name mcp__nimbalyst__PromptForUserInput, which CustomToolWidgets maps to
-  // RequestUserInputWidget), keyed by the same promptId. A second synthetic row
-  // landed ~before the proxy turn's text → widget rendered above its motivating
-  // text + a duplicate card. Settle still writes the synthetic tool_result.
-  // `isCliSession` is still needed by the settle path.
+  // The external CLI can block before proxy observation writes its assembled
+  // assistant turn. Persist the form immediately so the durable transcript
+  // always has a response surface. A later proxy turn reuses the same id and is
+  // deduplicated by ClaudeCodeRawParser.
   const isCliSession = sessionId ? await isClaudeCliSession(sessionId) : false;
+  if (isCliSession && sessionId) {
+    await persistInteractivePromptToolUse({
+      sessionId,
+      toolUseId: promptId,
+      toolName: 'PromptForUserInput',
+      input: args,
+    });
+    broadcastMessageLogged(sessionId, workspacePath ?? '');
+  }
 
   // Notify renderer so the widget can pick up the prompt data immediately
   // (used for voice forwarding -- the widget itself reads from the tool call).

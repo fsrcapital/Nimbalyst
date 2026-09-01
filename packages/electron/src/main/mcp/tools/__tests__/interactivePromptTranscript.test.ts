@@ -103,14 +103,9 @@ describe('interactive-prompt synthetic rows project into a widget-renderable too
     expect(toolCall.result == null || toolCall.result === '').toBe(true);
   });
 
-  // NIM-806: the proxy observation bridge now persists the CLI's whole assistant
-  // turn (source 'claude-code') INCLUDING the AskUserQuestion tool_use block, so
-  // the synthetic nimbalyst_tool_use row is redundant — and writing both caused an
-  // ordering inversion (synthetic row at tool-call time sorts BEFORE the proxy
-  // turn's explanatory text, persisted ~26ms later at message_stop) plus a
-  // double-rendered question. This proves the proxy turn ALONE renders the same
-  // answerable widget, ordered AFTER its text — the safety net for dropping the
-  // synthetic write (Option B).
+  // The proxy turn remains a second projection source. It must render the prompt
+  // when it arrives first, while the immediate synthetic row protects the gap
+  // before proxy observation is available.
   it('renders the answerable AskUserQuestion widget from the proxy assistant turn, after its text', async () => {
     const messages: RawMessage[] = [
       raw({
@@ -161,6 +156,83 @@ describe('interactive-prompt synthetic rows project into a widget-renderable too
     const widgetIdx = vms.findIndex(isAuq);
     expect(textIdx).toBeGreaterThanOrEqual(0);
     expect(widgetIdx).toBeGreaterThan(textIdx);
+  });
+
+  it('keeps one answerable widget when the immediate row and later proxy turn share an id', async () => {
+    const messages: RawMessage[] = [
+      raw({
+        id: 1,
+        content: buildInteractivePromptToolUseContent({
+          toolUseId: TOOL_USE_ID,
+          toolName: 'AskUserQuestion',
+          input: { questions },
+        }),
+      }),
+      raw({
+        id: 2,
+        createdAt: new Date('2026-06-08T00:00:01Z'),
+        content: JSON.stringify({
+          type: 'assistant',
+          message: {
+            id: 'msg_proxyturn_after_prompt',
+            role: 'assistant',
+            model: 'claude-opus-4-8',
+            content: [
+              { type: 'text', text: 'Please choose an option.' },
+              {
+                type: 'tool_use',
+                id: TOOL_USE_ID,
+                name: 'mcp__nimbalyst-mcp__AskUserQuestion',
+                input: { questions },
+              },
+            ],
+          },
+        }),
+      }),
+    ];
+
+    const vms = await projectRawMessagesToViewMessages(messages, 'claude-code-cli');
+    const toolCalls = vms.filter((m: any) => m?.toolCall?.providerToolCallId === TOOL_USE_ID);
+
+    expect(toolCalls).toHaveLength(1);
+    const [toolMessage] = toolCalls;
+    expect(toolMessage).toBeDefined();
+    const toolCall = toolMessage!.toolCall!;
+    expect(toolCall.arguments.questions).toEqual(questions);
+    expect(toolCall.result == null || toolCall.result === '').toBe(true);
+  });
+
+  it('keeps a structured-input form answerable when proxy observation has not arrived', async () => {
+    const input = {
+      title: 'Choose scope',
+      fields: [
+        {
+          type: 'singleSelect',
+          id: 'scope',
+          label: 'Scope',
+          options: [{ id: 'all', label: 'Everything' }],
+        },
+      ],
+    };
+    const messages: RawMessage[] = [
+      raw({
+        id: 1,
+        content: buildInteractivePromptToolUseContent({
+          toolUseId: 'toolu_01CliStructuredInput',
+          toolName: 'PromptForUserInput',
+          input,
+        }),
+      }),
+    ];
+
+    const vms = await projectRawMessagesToViewMessages(messages, 'claude-code-cli');
+    const toolCall = findToolCall(vms);
+
+    expect(toolCall).toBeDefined();
+    expect(toolCall.toolName).toBe('PromptForUserInput');
+    expect(toolCall.providerToolCallId).toBe('toolu_01CliStructuredInput');
+    expect(toolCall.arguments).toEqual(input);
+    expect(toolCall.result == null || toolCall.result === '').toBe(true);
   });
 
   it('clears the tool call once the synthetic tool_result is appended', async () => {

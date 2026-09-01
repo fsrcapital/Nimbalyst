@@ -49,6 +49,7 @@ export interface RemoteGatewayDependencies {
       attentionReasons?: string[];
     },
   ): Promise<unknown>;
+  getUsage(): Promise<unknown>;
   getWebPushPublicKey(): string;
   subscribeWebPush(input: {
     endpoint: string;
@@ -154,6 +155,10 @@ export function createRemoteGatewayRouter(deps: RemoteGatewayDependencies) {
       }
       if (request.method === 'GET' && request.pathname === `${REMOTE_GATEWAY_PREFIX}/workspaces`) {
         return { status: 200, body: { workspaces } };
+      }
+
+      if (request.method === 'GET' && request.pathname === `${REMOTE_GATEWAY_PREFIX}/usage`) {
+        return { status: 200, body: await deps.getUsage() };
       }
 
       if (request.method === 'GET' && request.pathname === `${REMOTE_GATEWAY_PREFIX}/notifications/vapid-public-key`) {

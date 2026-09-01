@@ -11,6 +11,7 @@ import {
   listGatewaySessions,
   listGatewaySessionCreationOptions,
   listGatewayWorkspaces,
+  getGatewayUsage,
   getGatewayTranscript,
   respondGatewayPrompt,
   sendGatewayPrompt,
@@ -21,6 +22,7 @@ import {
   type GatewaySessionCreationOptions,
   type GatewayTranscript,
   type GatewayTranscriptMessage,
+  type GatewayUsage,
   type GatewayWorkspace,
 } from "../lib/gateway";
 import { chooseWorkspacePath, sessionsForWorkspace } from "../lib/workspaceView";
@@ -379,6 +381,107 @@ function WorkspaceNavigation({
   );
 }
 
+function usagePercent(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(100, value))
+    : null;
+}
+
+function formatUsageReset(value: string | null | undefined): string {
+  if (!value) return "Reset time unavailable";
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return "Reset time unavailable";
+  const minutes = Math.max(0, Math.round((timestamp - Date.now()) / 60_000));
+  if (minutes < 60) return `Resets in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 48 ? `Resets in ${hours}h` : `Resets in ${Math.round(hours / 24)}d`;
+}
+
+function UsageMeter({
+  label,
+  used,
+  resetsAt,
+}: {
+  label: string;
+  used: unknown;
+  resetsAt?: string | null;
+}) {
+  const utilization = usagePercent(used);
+  if (utilization === null) return null;
+  const remaining = Math.round(100 - utilization);
+  const tone = utilization >= 80 ? "usage-critical" : utilization >= 50 ? "usage-warning" : "usage-safe";
+  return (
+    <div className="usage-meter">
+      <div className="usage-meter-label">
+        <span>{label}</span>
+        <strong className={tone}>{remaining}% Left</strong>
+      </div>
+      <div className="usage-meter-track" aria-label={`${label}: ${remaining}% remaining`}>
+        <span className={tone} style={{ width: `${utilization}%` }} />
+      </div>
+      <small>{formatUsageReset(resetsAt)}</small>
+    </div>
+  );
+}
+
+function UsagePanel({
+  usage,
+  loading,
+  error,
+  onRefresh,
+}: {
+  usage: GatewayUsage | null;
+  loading: boolean;
+  error: string;
+  onRefresh: () => void;
+}) {
+  const codexWindows = (usage?.codex?.limits ?? [])
+    .flatMap((limit) => (limit.windows ?? []).map((window) => ({ limit, window })))
+    .slice(0, 2);
+
+  return (
+    <section className="usage-panel" aria-label="Remaining Usage">
+      <header>
+        <div>
+          <span className="eyebrow">Account Limits</span>
+          <h2>Usage Remaining</h2>
+        </div>
+        <button type="button" onClick={onRefresh} disabled={loading}>
+          {loading ? "Refreshing…" : "Refresh"}
+        </button>
+      </header>
+      {error ? <p className="usage-panel-error">{error}</p> : null}
+      {!usage && loading ? <p className="usage-panel-empty">Loading usage from your desktop…</p> : null}
+      {usage?.claude ? (
+        <div className="usage-provider">
+          <h3>Claude</h3>
+          {usage.claude.error ? <p>{usage.claude.error}</p> : (
+            <>
+              <UsageMeter label="5-Hour Session" used={usage.claude.fiveHour?.utilization} resetsAt={usage.claude.fiveHour?.resetsAt} />
+              <UsageMeter label="7-Day Weekly" used={usage.claude.sevenDay?.utilization} resetsAt={usage.claude.sevenDay?.resetsAt} />
+              <UsageMeter label="Opus Weekly" used={usage.claude.sevenDayOpus?.utilization} resetsAt={usage.claude.sevenDayOpus?.resetsAt} />
+            </>
+          )}
+        </div>
+      ) : null}
+      {usage?.codex ? (
+        <div className="usage-provider">
+          <h3>Codex</h3>
+          {usage.codex.error ? <p>{usage.codex.error}</p> : codexWindows.length > 0 ? codexWindows.map(({ limit, window }, index) => (
+            <UsageMeter
+              key={`${limit.id ?? index}:${window.slot ?? index}`}
+              label={`${limit.name ?? "Codex"} ${window.slot === "secondary" ? "Weekly" : "Session"}`}
+              used={window.usedPercent}
+              resetsAt={window.resetsAt}
+            />
+          )) : <p>No Codex rate limits are available for this account.</p>}
+        </div>
+      ) : null}
+      {usage && !usage.claude && !usage.codex ? <p className="usage-panel-empty">Usage is not available for the connected desktop accounts.</p> : null}
+    </section>
+  );
+}
+
 function TranscriptMessage({ message }: { message: GatewayTranscriptMessage }) {
   return (
     <article className={`transcript-message transcript-${message.kind} ${message.isError ? "transcript-error" : ""}`}>
@@ -708,6 +811,10 @@ export default function NimbalystMobile() {
   const [promptResponseBusy, setPromptResponseBusy] = useState(false);
   const [promptResponseError, setPromptResponseError] = useState("");
   const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [usageOpen, setUsageOpen] = useState(false);
+  const [usage, setUsage] = useState<GatewayUsage | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageError, setUsageError] = useState("");
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const lastTranscriptCursorRef = useRef(0);
   const lastTranscriptSessionRef = useRef("");
@@ -1063,6 +1170,24 @@ export default function NimbalystMobile() {
     setGatewayRefreshKey((current) => current + 1);
   };
 
+  const refreshUsage = async () => {
+    if (!pairing || demoMode) return;
+    setUsageLoading(true);
+    setUsageError("");
+    try {
+      setUsage(await getGatewayUsage(pairing.account));
+    } catch (caught) {
+      setUsageError(caught instanceof Error ? caught.message : "Could not load usage from the desktop.");
+    } finally {
+      setUsageLoading(false);
+    }
+  };
+
+  const toggleUsage = () => {
+    if (!usageOpen) void refreshUsage();
+    setUsageOpen((open) => !open);
+  };
+
   if (!pairingLoaded) {
     return (
       <PairingPanel
@@ -1187,6 +1312,7 @@ export default function NimbalystMobile() {
           </div>
           <div className="mobile-header-actions">
             {connected ? <button className="new-session-button new-session-button-compact" type="button" aria-label="Create New Session" onClick={() => setNewSessionOpen(true)}>＋</button> : null}
+            {connected ? <button className="usage-button usage-button-compact" type="button" aria-label="Show Usage Remaining" aria-expanded={usageOpen} onClick={toggleUsage}>◔</button> : null}
             {connected && pairing ? <NotificationBell account={pairing.account} /> : null}
             <span className={`connection-badge connection-${connectionClass}`}><i /> {connectionLabel}</span>
           </div>
@@ -1204,10 +1330,13 @@ export default function NimbalystMobile() {
           </div>
           <div className="desktop-heading-actions">
             {connected ? <button className="new-session-button" type="button" onClick={() => setNewSessionOpen(true)}><span aria-hidden="true">＋</span> New Session</button> : null}
+            {connected ? <button className="usage-button" type="button" aria-expanded={usageOpen} onClick={toggleUsage}>Usage</button> : null}
             {connected && pairing ? <NotificationBell account={pairing.account} /> : null}
             <span className={`connection-badge desktop-connection connection-${connectionClass}`}><i /> {connectionLabel}</span>
           </div>
         </div>
+
+        {usageOpen ? <UsagePanel usage={usage} loading={usageLoading} error={usageError} onRefresh={() => void refreshUsage()} /> : null}
 
         {gatewayError && (
           <div className="pairing-error gateway-recovery" role="alert">

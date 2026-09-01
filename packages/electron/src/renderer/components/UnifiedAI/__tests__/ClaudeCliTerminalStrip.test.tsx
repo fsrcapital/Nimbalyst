@@ -15,7 +15,7 @@ vi.mock('../../Terminal/TerminalPanel', () => ({
   },
 }));
 
-import { ClaudeCliTerminalStrip } from '../ClaudeCliTerminalStrip';
+import { ClaudeCliTerminalStrip, requiresExplicitAgentResume } from '../ClaudeCliTerminalStrip';
 
 // Controllable IntersectionObserver: tests trigger an "on screen" entry on demand.
 let intersectCallbacks: Array<(entries: Array<{ isIntersecting: boolean }>) => void> = [];
@@ -87,5 +87,38 @@ describe('ClaudeCliTerminalStrip - launches the CLI only when this is the focuse
       store.set(windowFocusedAtom, true);
     });
     expect(launched()).toBe(true);
+  });
+
+  it('waits for an explicit resume request before launching an older session', () => {
+    const store = createStore();
+    store.set(windowFocusedAtom, true);
+    const view = render(
+      <Provider store={store}>
+        <ClaudeCliTerminalStrip
+          sessionId="s1"
+          workspacePath="/ws"
+          launchRequested={false}
+        />
+      </Provider>,
+    );
+    triggerOnScreen();
+    expect(launched()).toBe(false);
+
+    view.rerender(
+      <Provider store={store}>
+        <ClaudeCliTerminalStrip
+          sessionId="s1"
+          workspacePath="/ws"
+          launchRequested
+        />
+      </Provider>,
+    );
+    expect(launched()).toBe(true);
+  });
+
+  it('requires a resume only after one hour without a message', () => {
+    const now = 10_000_000;
+    expect(requiresExplicitAgentResume(now - (60 * 60 * 1000) + 1, now)).toBe(false);
+    expect(requiresExplicitAgentResume(now - (60 * 60 * 1000), now)).toBe(true);
   });
 });

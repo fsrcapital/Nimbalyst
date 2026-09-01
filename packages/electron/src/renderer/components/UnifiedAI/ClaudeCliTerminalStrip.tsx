@@ -18,6 +18,20 @@ export interface ClaudeCliTerminalStripProps {
    * intersect; the drawer header is always laid out, so observing it is correct.
    */
   observeRef?: React.RefObject<HTMLElement | null>;
+  /**
+   * Allows a session view to require a deliberate resume before its CLI process
+   * is started. This keeps older transcripts safe to browse without spending
+   * tokens merely because their terminal is mounted.
+   */
+  launchRequested?: boolean;
+}
+
+export const CLI_RESUME_IDLE_MS = 60 * 60 * 1000;
+
+export function requiresExplicitAgentResume(lastMessageAt: number | undefined, now = Date.now()): boolean {
+  return lastMessageAt !== undefined
+    && Number.isFinite(lastMessageAt)
+    && now - lastMessageAt >= CLI_RESUME_IDLE_MS;
 }
 
 /**
@@ -63,6 +77,7 @@ export const ClaudeCliTerminalStrip: React.FC<ClaudeCliTerminalStripProps> = ({
   model,
   focusNonce,
   observeRef,
+  launchRequested = true,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [launched, setLaunched] = useState(false);
@@ -80,7 +95,7 @@ export const ClaudeCliTerminalStrip: React.FC<ClaudeCliTerminalStripProps> = ({
 
     // Latch only once the strip is on-screen AND this is the OS-focused window.
     const tryLaunch = () => {
-      if (onScreenRef.current && windowFocused) {
+      if (launchRequested && onScreenRef.current && windowFocused) {
         setLaunched(true);
       }
     };
@@ -111,7 +126,7 @@ export const ClaudeCliTerminalStrip: React.FC<ClaudeCliTerminalStripProps> = ({
     return () => {
       observer?.disconnect();
     };
-  }, [launched, observeRef, windowFocused]);
+  }, [launched, launchRequested, observeRef, windowFocused]);
 
   return (
     <div ref={containerRef} style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>

@@ -89,6 +89,28 @@ export interface GatewayCreateSessionInput {
   useWorktree: boolean;
 }
 
+export type GatewayUsage = {
+  claude: {
+    fiveHour?: { utilization?: number; resetsAt?: string | null };
+    sevenDay?: { utilization?: number; resetsAt?: string | null };
+    sevenDayOpus?: { utilization?: number; resetsAt?: string | null };
+    error?: string;
+  } | null;
+  codex: {
+    limits?: Array<{
+      id?: string;
+      name?: string | null;
+      windows?: Array<{
+        slot?: "primary" | "secondary";
+        usedPercent?: number;
+        windowDurationMins?: number | null;
+        resetsAt?: string | null;
+      }>;
+    }>;
+    error?: string;
+  } | null;
+};
+
 export interface GatewayCreatedSession {
   sessionId: string;
   title: string;
@@ -192,6 +214,14 @@ export async function listGatewayWorkspaces(account: PairingAccount): Promise<Ga
     );
   }
   return workspaces;
+}
+
+export async function getGatewayUsage(account: PairingAccount): Promise<GatewayUsage> {
+  const payload = await request<GatewayUsage>(account, "/usage");
+  if (!payload || typeof payload !== "object") {
+    throw new Error("The desktop returned invalid usage information. Restart the fork and try again.");
+  }
+  return payload;
 }
 
 export async function listGatewaySessions(account: PairingAccount, workspacePath: string): Promise<GatewaySession[]> {

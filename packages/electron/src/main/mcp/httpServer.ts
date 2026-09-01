@@ -26,6 +26,8 @@ import { getDatabase } from "../database/initialize";
 import { createWorktreeStore } from "../services/WorktreeStore";
 import { GitWorktreeService } from "../services/GitWorktreeService";
 import { MetaAgentService } from "../services/MetaAgentService";
+import { claudeUsageService } from "../services/ClaudeUsageService";
+import { codexUsageService } from "../services/CodexUsageService";
 import { listRemoteGatewayWorkspaces } from "./remoteGatewayWorkspaceAccess";
 import {
   getWebPushPublicKey,
@@ -280,6 +282,10 @@ const routeRemoteGatewayRequest = createRemoteGatewayRouter({
     }
     return { sessionId, success: true, workflow };
   },
+  getUsage: async () => ({
+    claude: claudeUsageService.getCachedUsage() ?? await claudeUsageService.refresh(),
+    codex: codexUsageService.getCachedUsage() ?? await codexUsageService.refresh(),
+  }),
   getWebPushPublicKey,
   subscribeWebPush,
   unsubscribeWebPush,

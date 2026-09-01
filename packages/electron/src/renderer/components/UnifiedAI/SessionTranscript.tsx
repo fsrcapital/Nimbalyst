@@ -17,12 +17,12 @@
 import React, { useCallback, useRef, useImperativeHandle, forwardRef, useEffect, useState, useMemo } from 'react';
 import { useAtom, useSetAtom, useAtomValue } from 'jotai';
 import { store, registerInteractiveWidgetHost, unregisterInteractiveWidgetHost } from '@nimbalyst/runtime/store';
-import type { SessionData, ChatAttachment, TranscriptViewMessage } from '@nimbalyst/runtime/ai/server/types';
+import { isAgentProvider, type SessionData, type ChatAttachment, type TranscriptViewMessage } from '@nimbalyst/runtime/ai/server/types';
 import { agentCapabilitiesForProviderType } from '@nimbalyst/runtime/ai/server/agentCapabilities';
 import type { ToolCallDiffLoadResult } from '@nimbalyst/runtime/ai/server/transcript';
 import { AgentTranscriptPanel } from '@nimbalyst/runtime/ui/AgentTranscript/components/AgentTranscriptPanel';
 import type { TranscriptFileLocation } from '@nimbalyst/runtime/ui/AgentTranscript/components/MarkdownRenderer';
-import { ClaudeCliTerminalStrip } from './ClaudeCliTerminalStrip';
+import { ClaudeCliTerminalStrip, requiresExplicitAgentResume } from './ClaudeCliTerminalStrip';
 import { ClaudeCliNotInstalledNotice } from './ClaudeCliNotInstalledNotice';
 import type { InteractiveWidgetHost, PermissionScope } from '@nimbalyst/runtime/ui/AgentTranscript/components/CustomToolWidgets/InteractiveWidgetHost';
 import type { TodoItem } from '@nimbalyst/runtime/ui/AgentTranscript/types';
@@ -783,6 +783,7 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
   // (not a bare boolean) so the flag can't leak across sessions if this component
   // instance is reused for a different sessionId.
   const [startedCliSessionId, setStartedCliSessionId] = useState<string | null>(null);
+  const [resumedAgentSessionId, setResumedAgentSessionId] = useState<string | null>(null);
 
   // Diff tree grouping state
   const [groupByDirectory] = useAtom(diffTreeGroupByDirectoryAtom);
@@ -954,6 +955,14 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
   // Derived values
   const isLoading = isProcessing;
   const sessionHasMessages = messages.length > 0;
+  const latestMessageAt = useMemo(() => {
+    let latest = 0;
+    for (const message of messages) {
+      const timestamp = new Date(message.createdAt).getTime();
+      if (Number.isFinite(timestamp)) latest = Math.max(latest, timestamp);
+    }
+    return latest || undefined;
+  }, [messages]);
 
   // claude-code-cli (NIM-806): "committed" = the user has started this CLI session.
   // True once it has any transcript message (a turn has run / a prompt was logged)
@@ -963,6 +972,20 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
   // genuine `claude` process. Mirrors the backend's own "started session" gate
   // (shouldBlockStartedSessionProviderSwitch keys off messages.length > 0).
   const cliSessionCommitted = sessionHasMessages || startedCliSessionId === sessionId;
+  const agentResumeNeeded = isAgentProvider(provider)
+    && sessionHasMessages
+    && !isLoading
+    && requiresExplicitAgentResume(latestMessageAt)
+    && resumedAgentSessionId !== sessionId;
+  const cliResumeNeeded = isClaudeCliTerminalSession(provider) && agentResumeNeeded;
+
+  const handleResumeAgentSession = useCallback(() => {
+    setResumedAgentSessionId(sessionId);
+    if (isClaudeCliTerminalSession(provider)) {
+      setCliTerminalExpanded(true);
+      setCliTerminalUserCollapsed(false);
+    }
+  }, [sessionId, provider, setCliTerminalExpanded, setCliTerminalUserCollapsed]);
 
   // NIM-852: for a claude-code-cli session, detect whether the genuine `claude`
   // CLI is installed. Re-check when the session commits (a fresh install between
@@ -1136,11 +1159,19 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
     }
   }, [sessionId, getEffectiveDocumentContext, setDraftInput, setDraftAttachments, setLastSubmitAt, isQueueing, queuedPrompts, clearAIInputHistory]);
 
-  const handleSend = useCallback(async () => {
+  const handleSend = useCallback(async (submittedMessage?: string) => {
     // Read draft state imperatively — we deliberately don't subscribe to
     // these atoms in SessionTranscript (see SessionAIInput).
-    const currentDraftInput = store.get(sessionDraftInputAtom(sessionId)) ?? '';
+    // Prefer the value supplied by the focused input. This avoids losing a
+    // just-typed prompt if the imperative atom read briefly trails the
+    // controlled textarea during a renderer update.
+    const currentDraftInput = submittedMessage ?? store.get(sessionDraftInputAtom(sessionId)) ?? '';
     if (!currentDraftInput.trim() || !sessionData) return;
+
+    // Old agent sessions are safe to browse, but the first post-idle message
+    // may reconstruct a large provider context. Require an explicit resume
+    // before any agent provider receives that message.
+    if (agentResumeNeeded) return;
 
     // claude-code-cli (subscription, NIM-806): the genuine `claude` CLI runs in
     // the terminal strip and is driven by its PTY, not the Agent SDK loop. The
@@ -1338,7 +1369,7 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
       });
       setIsProcessing(false);
     }
-  }, [sessionId, sessionData, isLoading, getEffectiveDocumentContext, aiMode, workspacePath, setDraftInput, setDraftAttachments, setLastSubmitAt, resetHistory, updateSessionStore, handleQueue, setIsProcessing, messages, sessionHasMessages, startedCliSessionId, mode, onClearSession, onClearAgentSession, clearAIInputHistory, provider, recordClaudeActivity]);
+  }, [sessionId, sessionData, isLoading, getEffectiveDocumentContext, aiMode, workspacePath, setDraftInput, setDraftAttachments, setLastSubmitAt, resetHistory, updateSessionStore, handleQueue, setIsProcessing, messages, sessionHasMessages, startedCliSessionId, mode, onClearSession, onClearAgentSession, clearAIInputHistory, provider, recordClaudeActivity, agentResumeNeeded]);
 
   // Launch a sibling session from a `launch: new-session` action prompt.
   // Builds the originating-session mention prefix here (in the renderer) so the
@@ -2591,31 +2622,60 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
               }}
             />
           )}
-          <button
-            type="button"
-            className="claude-cli-terminal-drawer-toggle"
-            onClick={handleToggleCliTerminal}
+          <div
+            className="claude-cli-terminal-drawer-header"
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: 6,
-              padding: '4px 8px',
               background: 'var(--nim-bg-secondary)',
-              border: 'none',
               borderBottom: cliTerminalExpanded ? '1px solid var(--nim-border)' : 'none',
-              color: 'var(--nim-text-muted)',
-              fontSize: 11,
-              cursor: 'pointer',
-              textAlign: 'left',
               flex: '0 0 auto',
             }}
-            title={cliTerminalExpanded ? 'Collapse raw terminal' : 'Expand raw terminal'}
           >
-            <span style={{ transform: cliTerminalExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.1s' }}>
-              ▶
-            </span>
-            <span>Raw terminal</span>
-          </button>
+            <button
+              type="button"
+              className="claude-cli-terminal-drawer-toggle"
+              onClick={handleToggleCliTerminal}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '4px 8px',
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--nim-text-muted)',
+                fontSize: 11,
+                cursor: 'pointer',
+                textAlign: 'left',
+                flex: 1,
+              }}
+              title={cliTerminalExpanded ? 'Collapse raw terminal' : 'Expand raw terminal'}
+            >
+              <span style={{ transform: cliTerminalExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.1s' }}>
+                ▶
+              </span>
+              <span>Raw terminal</span>
+            </button>
+            {cliResumeNeeded && (
+              <button
+                type="button"
+                className="claude-cli-resume-button"
+                onClick={handleResumeAgentSession}
+                style={{
+                  marginRight: 8,
+                  padding: '2px 7px',
+                  border: '1px solid var(--nim-border)',
+                  borderRadius: 4,
+                  background: 'var(--nim-bg-primary)',
+                  color: 'var(--nim-text-primary)',
+                  fontSize: 11,
+                  cursor: 'pointer',
+                }}
+              >
+                Resume Agent
+              </button>
+            )}
+          </div>
           {/* Keep the strip mounted always (PTY lifecycle); hide only its body when
               collapsed. The strip observes the always-on-screen drawer root
               (cliTerminalDrawerRef), so the CLI still spawns while collapsed. */}
@@ -2634,6 +2694,7 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
               model={currentModel ?? undefined}
               focusNonce={cliTerminalFocusNonce}
               observeRef={cliTerminalDrawerRef}
+              launchRequested={!cliResumeNeeded}
             />
           </div>
         </div>
@@ -2669,6 +2730,40 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
 
       {/* Note: All interactive prompts (ToolPermission, ExitPlanMode, AskUserQuestion) use inline widgets in transcript */}
 
+      {agentResumeNeeded && !isClaudeCliTerminalSession(provider) && (
+        <div
+          className="agent-resume-gate"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '8px 12px',
+            borderTop: '1px solid var(--nim-border)',
+            background: 'var(--nim-bg-secondary)',
+            color: 'var(--nim-text-muted)',
+            fontSize: 12,
+          }}
+        >
+          <span>This agent has been idle for over an hour.</span>
+          <button
+            type="button"
+            className="agent-resume-button"
+            onClick={handleResumeAgentSession}
+            style={{
+              marginLeft: 'auto',
+              padding: '4px 8px',
+              border: '1px solid var(--nim-border)',
+              borderRadius: 4,
+              background: 'var(--nim-bg-primary)',
+              color: 'var(--nim-text-primary)',
+              cursor: 'pointer',
+            }}
+          >
+            Resume Agent
+          </button>
+        </div>
+      )}
+
       {/* Input area — wrapped so the draftInput subscription doesn't
           re-render the entire SessionTranscript on every keystroke. */}
       <SessionAIInput
@@ -2676,6 +2771,7 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
         testId={mode === 'chat' ? 'files-mode-chat-input' : 'agent-mode-chat-input'}
         onSend={handleSend}
         onCancel={handleCancel}
+        disabled={agentResumeNeeded}
         isLoading={isLoading}
         workspacePath={workspacePath}
         sessionId={sessionId}
@@ -2685,7 +2781,9 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
         enableSlashCommands={enableSlashCommands}
         onNavigateHistory={enableHistoryNavigation ? handleNavigateHistory : undefined}
         placeholder={
-          mode === 'chat'
+          cliResumeNeeded
+            ? 'Resume Agent to continue this session'
+            : mode === 'chat'
             ? "Ask a question. @ for files, @@ for sessions, / for commands"
             : enableSlashCommands
               ? "Type your message... (Enter to send, Shift+Enter for new line, @ for files, @@ for sessions, / for commands)"
