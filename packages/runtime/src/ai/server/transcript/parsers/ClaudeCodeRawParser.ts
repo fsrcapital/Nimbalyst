@@ -101,12 +101,13 @@ export class ClaudeCodeRawParser implements IRawMessageParser {
             reminderKind: this.extractReminderKind(msg.metadata),
             createdAt: msg.createdAt,
           });
-        } else if (msg.metadata?.promptOrigin === 'wakeup_resume') {
+        } else if (msg.metadata?.promptOrigin === 'wakeup_resume' || msg.metadata?.promptOrigin === 'cache_warm') {
+          const reminderKind = msg.metadata.promptOrigin;
           descriptors.push({
             type: 'system_message',
-            text: parsed.prompt,
+            text: reminderKind === 'cache_warm' ? 'Prompt cache refreshed automatically.' : parsed.prompt,
             systemType: 'status',
-            reminderKind: 'wakeup_resume',
+            reminderKind,
             searchable: false,
             createdAt: msg.createdAt,
           });

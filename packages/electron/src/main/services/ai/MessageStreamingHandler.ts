@@ -2667,9 +2667,13 @@ export class MessageStreamingHandler {
               // before the timer fires.
               this.svc.hooklessWatcher.scheduleStop(session.id, 500);
 
-              // Play completion sound if enabled
-              const soundService = SoundNotificationService.getInstance();
-              soundService.playCompletionSound(workspacePath);
+              const isCacheWarmRefresh = documentContext?.promptOrigin === 'cache_warm';
+
+              // Cache refreshes are background maintenance, not user work.
+              if (!isCacheWarmRefresh) {
+                const soundService = SoundNotificationService.getInstance();
+                soundService.playCompletionSound(workspacePath);
+              }
 
               // Show OS notification if enabled and window not focused
               // Use lastTextSection (text after last tool call) for more relevant notification content
@@ -2691,22 +2695,24 @@ export class MessageStreamingHandler {
               //     : 'fullResponse',
               // });
 
-              await notificationService.showNotification({
-                title: composeNotificationTitle(sessionLabel, 'Response Ready'),
-                body: notificationBody,
-                kind: 'agent-complete',
-                sessionId: session.id,
-                workspacePath: workspacePath,
-                sourceLabel: sessionLabel,
-                provider: session.provider
-              });
+              if (!isCacheWarmRefresh) {
+                await notificationService.showNotification({
+                  title: composeNotificationTitle(sessionLabel, 'Response Ready'),
+                  body: notificationBody,
+                  kind: 'agent-complete',
+                  sessionId: session.id,
+                  workspacePath: workspacePath,
+                  sourceLabel: sessionLabel,
+                  provider: session.provider
+                });
+              }
 
               // Request mobile push notification for agent completion.
               // Only send when user has truly left their computer (screen locked or idle
               // past threshold). When the window is merely unfocused (user in another app),
               // the Electron notification above already covers it -- sending a mobile push
               // too causes duplicates via iPhone Mirroring / Continuity.
-              if (syncProvider && isDesktopTrulyAway()) {
+              if (!isCacheWarmRefresh && syncProvider && isDesktopTrulyAway()) {
                 void requestMobilePush(
                   session.id,
                   session.title || 'AI Session',

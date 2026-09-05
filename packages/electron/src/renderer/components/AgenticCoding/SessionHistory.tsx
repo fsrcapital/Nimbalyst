@@ -3710,6 +3710,7 @@ const SessionHistoryComponent: React.FC = () => {
                       onSessionRename={onSessionRename}
                       onSessionBranch={onSessionBranch}
                       worktree={worktreeData || { id: item.worktreeId, name: 'Loading...', path: '', branch: '' }}
+                      projectPath={workspacePath}
                       gitStatus={worktreeData?.gitStatus}
                       onWorktreePinToggle={handleWorktreePinToggle}
                       onWorktreeArchive={handleArchiveWorktree}
@@ -3854,6 +3855,8 @@ const SessionHistoryComponent: React.FC = () => {
                     waitingOn={session.waitingOn}
                     attentionReasons={session.attentionReasons}
                     needsAttention={session.needsAttention}
+                    cacheWarmEnabled={session.cacheWarmEnabled}
+                    cacheWarmNextAt={session.cacheWarmNextAt}
                   />
                 );
               }}

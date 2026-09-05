@@ -121,7 +121,7 @@ const PHASE_STYLES: Record<string, { label: string; color: string; bg: string }>
   complete: { label: 'Complete', color: 'var(--nim-success)', bg: 'rgba(74,222,128,0.12)' },
 };
 
-const SessionPhaseBadge = memo<{ phase: string }>(({ phase }) => {
+export const SessionPhaseBadge = memo<{ phase: string }>(({ phase }) => {
   const style = PHASE_STYLES[phase];
   if (!style) return null;
   return (
@@ -175,6 +175,8 @@ interface SessionListItemProps {
   waitingOn?: string;
   attentionReasons?: SessionAttentionReason[];
   needsAttention?: boolean;
+  cacheWarmEnabled?: boolean;
+  cacheWarmNextAt?: number;
 }
 
 // Named rather than an inline arrow so the render profiler can report it by
@@ -217,6 +219,8 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
   waitingOn,
   attentionReasons,
   needsAttention = false,
+  cacheWarmEnabled,
+  cacheWarmNextAt,
 }) {
   const [isHovering, setIsHovering] = useState(false);
   const [showContextMenu, setShowContextMenu] = useState(false);
@@ -611,6 +615,8 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
           attentionReasons={attentionReasons}
           hasPendingPrompt={isAwaitingInput}
           isRowHovering={isHovering}
+          cacheWarmEnabled={cacheWarmEnabled}
+          cacheWarmNextAt={cacheWarmNextAt}
         />
         <SessionStatusIndicator sessionId={id} messageCount={messageCount} />
         {/*{(onArchive || onUnarchive) && (*/}

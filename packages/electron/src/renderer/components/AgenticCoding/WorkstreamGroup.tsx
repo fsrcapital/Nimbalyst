@@ -24,7 +24,7 @@ import { SessionRelativeTime } from './SessionRelativeTime';
 import { FullTitleTooltip } from './FullTitleTooltip';
 import { SessionWorkflowPopover } from './SessionWorkflowPopover';
 import { sessionAgentWakePendingAtom } from '../../store/atoms/teamInbox';
-import { SessionExecutionLabel } from './SessionListItem';
+import { SessionExecutionLabel, SessionPhaseBadge } from './SessionListItem';
 
 /**
  * Unified component for rendering expandable session groups in the session history.
@@ -199,7 +199,7 @@ export const WorkstreamGroup: React.FC<WorkstreamGroupProps> = ({
   const refreshSessionList = useSetAtom(refreshSessionListAtom);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
-    if (type !== 'workstream' || !projectPath) return;
+    if ((type !== 'workstream' && type !== 'worktree') || !projectPath) return;
     const hasSessionData = e.dataTransfer.types.includes('application/x-nimbalyst-session');
     if (!hasSessionData) return;
     e.preventDefault();
@@ -219,9 +219,6 @@ export const WorkstreamGroup: React.FC<WorkstreamGroupProps> = ({
     e.stopPropagation();
     setIsValidDropTarget(false);
 
-    // Only workstream groups accept drops, not worktree groups
-    if (type !== 'workstream') return;
-
     const dataStr = e.dataTransfer.getData('application/x-nimbalyst-session');
     if (!dataStr || !projectPath) return;
 
@@ -234,6 +231,24 @@ export const WorkstreamGroup: React.FC<WorkstreamGroupProps> = ({
       if (workspacePath !== projectPath) return;
       if (sessionId === id) return;
       if (parentId === id) return;
+
+      if (type === 'worktree') {
+        const result = await window.electronAPI.invoke('sessions:attach-to-worktree', {
+          sessionId,
+          worktreeId: id,
+          workspacePath: projectPath,
+        });
+        if (!result?.success) {
+          console.error('[WorkstreamGroup] Failed to attach session to worktree:', result?.error);
+          errorNotificationService.showError(
+            'Move to worktree failed',
+            result?.error || 'The session could not be attached to this worktree.',
+          );
+          return;
+        }
+        await refreshSessionList();
+        return;
+      }
 
       const success = await reparentSession({
         sessionId,
@@ -256,6 +271,10 @@ export const WorkstreamGroup: React.FC<WorkstreamGroupProps> = ({
       }
     } catch (error) {
       console.error('[WorkstreamGroup] Failed to handle drop:', error);
+      errorNotificationService.showError(
+        'Move session failed',
+        error instanceof Error ? error.message : 'The session could not be moved.',
+      );
     }
   }, [type, projectPath, id, reparentSession, refreshSessionList]);
 
@@ -749,6 +768,7 @@ export const WorkstreamGroup: React.FC<WorkstreamGroupProps> = ({
             <WorkstreamSessionItem
               key={session.id}
               session={session}
+              parentType={type}
               isActive={session.id === activeSessionId}
               onClick={(e) => {
                 // Always go through onSessionSelect so shift/cmd-click selection works.
@@ -1055,6 +1075,7 @@ const WorkstreamSessionStatusIndicator = memo<{ sessionId: string; uncommittedCo
 // Child session item within a workstream group
 interface WorkstreamSessionItemProps {
   session: SessionItem;
+  parentType: WorkstreamGroupProps['type'];
   isActive: boolean;
   onClick: (e: Pick<React.MouseEvent, 'metaKey' | 'ctrlKey' | 'shiftKey'>) => void;
   onDelete?: () => void;
@@ -1068,6 +1089,7 @@ interface WorkstreamSessionItemProps {
 
 const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
   session,
+  parentType,
   isActive,
   onClick,
   onDelete,
@@ -1090,6 +1112,8 @@ const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
 
   const currentTitle = useAtomValue(sessionListTitleAtom(session.id));
   const displayTitle = currentTitle || session.title || 'Untitled Session';
+  const displayModel = session.model?.includes(':') ? session.model.split(':')[1] : session.model;
+  const gitLocation = parentType === 'worktree' || session.worktreeId ? 'Worktree' : 'Main Tree';
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1158,7 +1182,7 @@ const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
   return (
     <div
       data-testid="workstream-child-item"
-      className={`workstream-session-item flex items-center gap-2 py-1.5 px-3 mr-2 mb-0.5 cursor-pointer rounded transition-colors duration-150 select-none ${
+      className={`workstream-session-item flex items-start gap-2 py-1.5 px-3 mr-2 mb-0.5 cursor-pointer rounded transition-colors duration-150 select-none ${
         isActive ? 'active bg-[var(--nim-bg-selected)]' : 'hover:bg-[var(--nim-bg-hover)]'
       } ${session.isArchived ? 'opacity-60 hover:opacity-80' : ''} focus:outline-2 focus:outline-[var(--nim-border-focus)] focus:outline-offset-[-2px]`}
       onClick={onClick}
@@ -1176,7 +1200,7 @@ const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
       aria-label={`Session: ${displayTitle}`}
       aria-current={isActive ? 'page' : undefined}
     >
-      <div className={`workstream-session-item-icon shrink-0 flex items-center justify-center ${
+      <div className={`workstream-session-item-icon mt-0.5 shrink-0 flex items-center justify-center ${
         isActive ? 'text-[var(--nim-primary)]' : 'text-[var(--nim-text-muted)]'
       }`}>
         <ProviderIcon provider={session.provider || 'claude'} size={14} />
@@ -1191,11 +1215,12 @@ const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
           isActive ? 'text-[var(--nim-primary)]' : 'text-[var(--nim-text-faint)]'
         }`} title="Shared" />
       )}
+      <div className="workstream-session-item-content min-w-0 flex-1 overflow-hidden">
       {isRenaming ? (
         <input
           ref={renameInputRef}
           type="text"
-          className="workstream-session-item-rename-input flex-1 min-w-0 py-0.5 px-1.5 text-xs font-medium border border-[var(--nim-primary)] rounded bg-[var(--nim-bg)] text-[var(--nim-text)] outline-none box-border"
+          className="workstream-session-item-rename-input w-full min-w-0 py-0.5 px-1.5 text-xs font-medium border border-[var(--nim-primary)] rounded bg-[var(--nim-bg)] text-[var(--nim-text)] outline-none box-border"
           value={renameValue}
           onChange={(e) => setRenameValue(e.target.value)}
           onKeyDown={handleRenameKeyDown}
@@ -1206,19 +1231,48 @@ const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
         <>
           <FullTitleTooltip
             label={displayTitle}
-            className={`workstream-session-item-title flex-1 text-xs text-[var(--nim-text)] whitespace-nowrap overflow-hidden text-ellipsis ${
+            className={`workstream-session-item-title block text-xs text-[var(--nim-text)] whitespace-nowrap overflow-hidden text-ellipsis ${
               isActive ? 'font-medium' : ''
             }`}
           >
             {displayTitle}
           </FullTitleTooltip>
-          <span className="workstream-session-item-timestamp shrink-0 text-[0.6875rem] text-[var(--nim-text-faint)] ml-2">
-            <SessionRelativeTime sessionId={session.id} fallbackTimestamp={session.updatedAt || session.createdAt} />
-          </span>
-          <SessionExecutionLabel sessionId={session.id} showIdle={false} />
+          <div className="workstream-session-item-meta mt-0.5 flex min-w-0 items-center gap-1.5 text-[0.6875rem] text-[var(--nim-text-faint)]">
+            <span className="workstream-session-item-timestamp shrink-0 whitespace-nowrap">
+              <SessionRelativeTime sessionId={session.id} fallbackTimestamp={session.updatedAt || session.createdAt} />
+            </span>
+            {displayModel && (
+              <span className="workstream-session-item-model overflow-hidden text-ellipsis whitespace-nowrap">
+                {displayModel}
+              </span>
+            )}
+            {session.phase && <SessionPhaseBadge phase={session.phase} />}
+          </div>
+          <div className="workstream-session-item-runtime mt-0.5 flex min-w-0 items-center gap-2 text-[0.625rem]">
+            <SessionExecutionLabel sessionId={session.id} />
+            <span
+              className="workstream-session-item-git-location inline-flex min-w-0 items-center gap-1 text-[var(--nim-text-muted)]"
+              title={`Git Location: ${gitLocation}`}
+            >
+              <MaterialSymbol icon="account_tree" size={10} />
+              <span className="overflow-hidden text-ellipsis whitespace-nowrap">{gitLocation}</span>
+            </span>
+          </div>
+          {(session.waitingOn || session.nextAction) && (
+            <div
+              className={`workstream-session-item-workflow mt-0.5 flex min-w-0 items-center gap-1 text-[0.625rem] ${session.waitingOn ? 'text-[var(--nim-warning)]' : 'text-[var(--nim-text-muted)]'}`}
+              title={session.waitingOn ? `Waiting on: ${session.waitingOn}` : `Next action: ${session.nextAction}`}
+            >
+              <MaterialSymbol icon={session.waitingOn ? 'hourglass_top' : 'arrow_forward'} size={11} />
+              <span className="overflow-hidden text-ellipsis whitespace-nowrap">
+                {session.waitingOn ? `Waiting: ${session.waitingOn}` : `Next: ${session.nextAction}`}
+              </span>
+            </div>
+          )}
         </>
       )}
-      <div className="workstream-session-item-right flex items-center gap-1 shrink-0">
+      </div>
+      <div className="workstream-session-item-right flex shrink-0 items-center gap-1">
         <SessionWorkflowPopover
           sessionId={session.id}
           myNotes={session.myNotes}
@@ -1227,6 +1281,9 @@ const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
           attentionReasons={session.attentionReasons}
           hasPendingPrompt={hasInteractivePrompt || hasPendingPrompt}
           isRowHovering={isHovering}
+          alwaysVisible
+          cacheWarmEnabled={session.cacheWarmEnabled}
+          cacheWarmNextAt={session.cacheWarmNextAt}
         />
         <WorkstreamSessionStatusIndicator sessionId={session.id} uncommittedCount={session.uncommittedCount} />
       </div>

@@ -777,6 +777,12 @@ export function createPGLiteSessionStore(db: PGliteLike, ensureDbReady?: EnsureR
           tags: Array.isArray(metadata.tags) ? metadata.tags : undefined,
           // Linked tracker item IDs from metadata JSONB
           linkedTrackerItemIds: Array.isArray(metadata.linkedTrackerItemIds) ? metadata.linkedTrackerItemIds : undefined,
+          cacheWarmEnabled: metadata.cacheWarmEnabled === true,
+          cacheWarmNextAt: typeof metadata.cacheWarmNextAt === 'number' ? metadata.cacheWarmNextAt : undefined,
+          cacheWarmLastAt: typeof metadata.cacheWarmLastAt === 'number' ? metadata.cacheWarmLastAt : undefined,
+          cacheWarmLastStatus: metadata.cacheWarmLastStatus === 'success' || metadata.cacheWarmLastStatus === 'failed'
+            ? metadata.cacheWarmLastStatus
+            : undefined,
           ...buildWorkflowListFields(metadata),
         } satisfies SessionMeta;
       });

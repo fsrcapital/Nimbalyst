@@ -65,6 +65,20 @@ export function applySessionMetadataUpdates(
     ...(updates.updatedAt !== undefined && { updatedAt: updates.updatedAt as number }),
     ...(updates.isArchived !== undefined && { isArchived: updates.isArchived as boolean }),
     ...(updates.isPinned !== undefined && { isPinned: updates.isPinned as boolean }),
+    ...(updates.cacheWarmEnabled !== undefined && {
+      cacheWarmEnabled: updates.cacheWarmEnabled === true,
+    }),
+    ...(updates.cacheWarmNextAt !== undefined && {
+      cacheWarmNextAt: typeof updates.cacheWarmNextAt === 'number' ? updates.cacheWarmNextAt : undefined,
+    }),
+    ...(updates.cacheWarmLastAt !== undefined && {
+      cacheWarmLastAt: typeof updates.cacheWarmLastAt === 'number' ? updates.cacheWarmLastAt : undefined,
+    }),
+    ...(updates.cacheWarmLastStatus !== undefined && {
+      cacheWarmLastStatus: updates.cacheWarmLastStatus === 'success' || updates.cacheWarmLastStatus === 'failed'
+        ? updates.cacheWarmLastStatus
+        : undefined,
+    }),
     hasPendingInteractivePrompt,
     myNotes: workflow.myNotes,
     nextAction: workflow.nextAction,

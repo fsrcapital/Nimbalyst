@@ -179,6 +179,7 @@ import {
 } from './protocols/collabAssetProtocol';
 import { SessionNamingService } from './services/SessionNamingService';
 import { SessionWakeupScheduler } from './services/SessionWakeupScheduler';
+import { SessionCacheWarmScheduler } from './services/SessionCacheWarmScheduler';
 import { getSessionWakeupsStore, repositoryManager } from './services/RepositoryManager';
 import { ExtensionDevService } from './services/ExtensionDevService';
 import { MetaAgentService } from './services/MetaAgentService';
@@ -2895,6 +2896,33 @@ app.whenReady().then(async () => {
     } catch (error) {
         logger.mcp.error('Failed to start session wakeup scheduler:', error);
     }
+    try {
+        SessionCacheWarmScheduler.getInstance().configure({
+            loadSession: (sessionId) => AISessionsRepository.get(sessionId),
+            updateMetadata: (sessionId, metadata) => AISessionsRepository.updateMetadata(sessionId, { metadata: { ...metadata } }),
+            executor: async ({ sessionId, workspacePath }) => {
+                if (!aiService) return { triggered: false };
+                await aiService.queuePromptForSession(
+                    sessionId,
+                    'Automatic prompt-cache keepalive. Do not inspect files or perform work. Reply with exactly: Cache kept warm.',
+                    undefined,
+                    {
+                        promptOrigin: 'cache_warm',
+                        promptProvenance: { actor: 'system', origin: 'automation' },
+                    },
+                );
+                const outcome = await aiService.driveQueuedPrompts(sessionId, workspacePath, 'wakeup');
+                return { triggered: outcome.kind !== 'failed' };
+            },
+            broadcastChanged: (sessionId, view) => {
+                for (const window of BrowserWindow.getAllWindows()) {
+                    if (!window.isDestroyed()) window.webContents.send('sessions:session-updated', sessionId, view);
+                }
+            },
+        });
+    } catch (error) {
+        logger.mcp.error('Failed to configure session cache warming:', error);
+    }
     markEnd('mcp-servers');
 
     // Set up IPC handler to update document state for MCP
@@ -3671,6 +3699,7 @@ app.on('before-quit', async (event) => {
     try {
         // Stop session wakeup scheduler (clears timer; rows in DB persist for next launch)
         SessionWakeupScheduler.getInstance().stop();
+        SessionCacheWarmScheduler.getInstance().stop();
     } catch (error) {
         console.error('[QUIT] Error stopping session wakeup scheduler:', error);
     }

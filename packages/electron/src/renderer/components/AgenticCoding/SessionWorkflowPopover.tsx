@@ -23,6 +23,9 @@ export interface SessionWorkflowPopoverProps {
   attentionReasons?: SessionAttentionReason[];
   hasPendingPrompt?: boolean;
   isRowHovering?: boolean;
+  alwaysVisible?: boolean;
+  cacheWarmEnabled?: boolean;
+  cacheWarmNextAt?: number;
 }
 
 function editableReasons(
@@ -41,6 +44,9 @@ export function SessionWorkflowPopover({
   attentionReasons,
   hasPendingPrompt = false,
   isRowHovering = false,
+  alwaysVisible = false,
+  cacheWarmEnabled = false,
+  cacheWarmNextAt,
 }: SessionWorkflowPopoverProps) {
   const menu = useFloatingMenu({ placement: "right-start" });
   const [notesDraft, setNotesDraft] = useState(myNotes ?? "");
@@ -49,6 +55,8 @@ export function SessionWorkflowPopover({
   const [reasonDraft, setReasonDraft] = useState<SessionAttentionReason[]>(
     editableReasons(attentionReasons)
   );
+  const cacheWarmActive = cacheWarmEnabled;
+  const [cacheWarmDraft, setCacheWarmDraft] = useState(cacheWarmActive);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -58,8 +66,9 @@ export function SessionWorkflowPopover({
     setNextActionDraft(nextAction ?? "");
     setWaitingOnDraft(waitingOn ?? "");
     setReasonDraft(editableReasons(attentionReasons));
+    setCacheWarmDraft(cacheWarmActive);
     setSaveError(null);
-  }, [attentionReasons, menu.isOpen, myNotes, nextAction, waitingOn]);
+  }, [attentionReasons, cacheWarmActive, menu.isOpen, myNotes, nextAction, waitingOn]);
 
   const resolvedAttention = useMemo(
     () =>
@@ -79,9 +88,11 @@ export function SessionWorkflowPopover({
     myNotes?.trim() ||
       nextAction?.trim() ||
       waitingOn?.trim() ||
-      attentionReasons?.length
+      attentionReasons?.length ||
+      cacheWarmActive
   );
   const showTrigger =
+    alwaysVisible ||
     isRowHovering ||
     menu.isOpen ||
     hasWorkflowContent ||
@@ -112,6 +123,16 @@ export function SessionWorkflowPopover({
       if (result?.success === false) {
         throw new Error(result.error || "Unable to save session workflow");
       }
+      if (cacheWarmDraft !== cacheWarmActive) {
+        const warmResult = await window.electronAPI.invoke(
+          "sessions:set-cache-warm",
+          sessionId,
+          cacheWarmDraft
+        );
+        if (warmResult?.success === false) {
+          throw new Error(warmResult.error || "Unable to update cache warming");
+        }
+      }
       menu.setIsOpen(false);
     } catch (error) {
       setSaveError(
@@ -124,6 +145,8 @@ export function SessionWorkflowPopover({
     }
   }, [
     menu,
+    cacheWarmActive,
+    cacheWarmDraft,
     nextActionDraft,
     notesDraft,
     reasonDraft,
@@ -149,6 +172,8 @@ export function SessionWorkflowPopover({
     ? `Waiting on: ${waitingOn.trim()}`
     : nextAction?.trim()
     ? `Next action: ${nextAction.trim()}`
+    : cacheWarmActive
+    ? "Prompt cache warming is enabled"
     : "Edit notes and next action";
 
   return (
@@ -238,6 +263,25 @@ export function SessionWorkflowPopover({
                 className="mt-1 w-full resize-y rounded border border-[var(--nim-border)] bg-[var(--nim-bg-secondary)] px-2 py-1.5 text-[0.75rem] leading-relaxed text-[var(--nim-text)] outline-none focus:border-[var(--nim-primary)]"
               />
             </label>
+
+            <fieldset className="mb-3 border-0 p-0">
+              <legend className="mb-1.5 text-[0.6875rem] font-medium text-[var(--nim-text-muted)]">
+                Prompt Cache
+              </legend>
+              <label className="flex items-center gap-2 text-[0.75rem] text-[var(--nim-text)]">
+                <input
+                  type="checkbox"
+                  checked={cacheWarmDraft}
+                  onChange={(event) => setCacheWarmDraft(event.target.checked)}
+                />
+                Keep warm until unchecked
+              </label>
+              <p className="mt-1 text-[0.625rem] text-[var(--nim-text-faint)]">
+                {cacheWarmDraft && cacheWarmNextAt
+                  ? `Next refresh around ${new Date(cacheWarmNextAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`
+                  : "Runs a small automatic refresh before the one-hour cache expires, until you turn it off."}
+              </p>
+            </fieldset>
 
             <fieldset className="mb-3 border-0 p-0">
               <legend className="mb-1.5 text-[0.6875rem] font-medium text-[var(--nim-text-muted)]">

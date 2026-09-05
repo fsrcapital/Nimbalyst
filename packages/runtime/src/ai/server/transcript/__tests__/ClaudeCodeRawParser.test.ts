@@ -91,6 +91,25 @@ describe('ClaudeCodeRawParser', () => {
       });
     });
 
+    it('renders cache_warm input as a concise system marker', async () => {
+      const parser = new ClaudeCodeRawParser();
+      const msg = makeRawMessage({
+        direction: 'input',
+        content: JSON.stringify({ prompt: 'Automatic prompt-cache keepalive.', options: {} }),
+        metadata: { promptOrigin: 'cache_warm' },
+      });
+
+      const descriptors = await parser.parseMessage(msg, makeContext());
+
+      expect(descriptors).toEqual([
+        expect.objectContaining({
+          type: 'system_message',
+          reminderKind: 'cache_warm',
+          text: 'Prompt cache refreshed automatically.',
+        }),
+      ]);
+    });
+
     it('does not treat regular user prompt with promptOrigin absent as wakeup', async () => {
       const parser = new ClaudeCodeRawParser();
       const msg = makeRawMessage({

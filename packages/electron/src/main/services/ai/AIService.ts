@@ -2771,7 +2771,7 @@ export class AIService {
       // When AskUserQuestion comes through the MCP server path (not the provider's canUseTool path),
       // the provider's pendingAskUserQuestions map won't have the entry. In that case, also write
       // the response to the database as a fallback so the MCP server's database polling can find it.
-      if (!providerResolved && resolvedSessionId) {
+      if (!providerResolved && resolvedSessionId && session?.workspacePath) {
         const { AgentMessagesRepository } = await import('@nimbalyst/runtime/storage/repositories/AgentMessagesRepository');
         try {
           await AgentMessagesRepository.create({
@@ -2804,7 +2804,7 @@ export class AIService {
       // while session was waiting for input). Auto-resume the session by sending
       // a new message that includes the user's answer. The Claude Code SDK will
       // resume using the stored providerSessionId, picking up conversation history.
-      if (resolvedSessionId && this.sendMessageHandler && session) {
+      if (resolvedSessionId && this.sendMessageHandler && session?.workspacePath) {
         // Issue #773: without a terminal tool_result the widget stayed pending, so
         // every re-click auto-resumed again. Refuse a repeat answer for a question
         // this process already terminalized.

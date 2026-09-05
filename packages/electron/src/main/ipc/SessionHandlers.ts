@@ -1,4 +1,5 @@
 import { SessionManager, ProviderFactory } from '@nimbalyst/runtime/ai/server';
+import { getSessionStateManager } from '@nimbalyst/runtime/ai/server/SessionStateManager';
 import { AISessionsRepository, TranscriptMigrationRepository } from '@nimbalyst/runtime';
 import {
     parseCodexToolLookupId,
@@ -28,6 +29,10 @@ import { setSessionPendingPrompt } from '../services/ai/pendingPromptPersistence
 import { normalizeSessionPhaseMetadataUpdate } from '../services/session/sessionPhaseTransition';
 import { destroyProviderForArchivedSession } from '../services/ai/archiveSessionProviderLifecycle';
 import { resolveSessionModelSelection } from '../services/ai/sessionModelSelection';
+import { SessionCacheWarmScheduler } from '../services/SessionCacheWarmScheduler';
+import { createWorktreeStore } from '../services/WorktreeStore';
+import { getDatabase } from '../database/initialize';
+import { getTerminalSessionManager } from '../services/TerminalSessionManager';
 
 // Initialize session manager
 const sessionManager = new SessionManager();
@@ -484,6 +489,7 @@ export async function registerSessionHandlers() {
         try {
             const startTime = performance.now();
             const entries = await AISessionsRepository.list(workspacePath, options);
+            SessionCacheWarmScheduler.getInstance().syncSessions(entries);
             const listTime = performance.now() - startTime;
             // console.log(`[SessionHandlers] sessions:list query took ${listTime.toFixed(1)}ms for ${entries.length} sessions`);
 
@@ -537,6 +543,15 @@ export async function registerSessionHandlers() {
                     tags: (entry as any).tags || undefined,
                     // Linked tracker item IDs
                     linkedTrackerItemIds: (entry as any).linkedTrackerItemIds || undefined,
+                    myNotes: entry.myNotes,
+                    nextAction: entry.nextAction,
+                    waitingOn: entry.waitingOn,
+                    attentionReasons: entry.attentionReasons,
+                    needsAttention: entry.needsAttention,
+                    cacheWarmEnabled: entry.cacheWarmEnabled,
+                    cacheWarmNextAt: entry.cacheWarmNextAt,
+                    cacheWarmLastAt: entry.cacheWarmLastAt,
+                    cacheWarmLastStatus: entry.cacheWarmLastStatus,
                     metadata: {}
                 };
             });
@@ -545,6 +560,16 @@ export async function registerSessionHandlers() {
         } catch (error) {
             console.error('[SessionHandlers] Failed to list sessions:', error);
             return { success: false, error: String(error), sessions: [] };
+        }
+    });
+
+    safeHandle('sessions:set-cache-warm', async (_event, sessionId: string, enabled: boolean) => {
+        try {
+            const policy = await SessionCacheWarmScheduler.getInstance().setEnabled(sessionId, enabled);
+            return { success: true, policy };
+        } catch (error) {
+            console.error('[SessionHandlers] Failed to update session cache warming:', error);
+            return { success: false, error: String(error) };
         }
     });
 
@@ -632,8 +657,20 @@ export async function registerSessionHandlers() {
                     phase: metadata.phase || undefined,
                     tags: Array.isArray(metadata.tags) ? metadata.tags : undefined,
                     linkedTrackerItemIds: Array.isArray(metadata.linkedTrackerItemIds) ? metadata.linkedTrackerItemIds : undefined,
+                    myNotes: typeof metadata.myNotes === 'string' ? metadata.myNotes : undefined,
+                    nextAction: typeof metadata.nextAction === 'string' ? metadata.nextAction : undefined,
+                    waitingOn: typeof metadata.waitingOn === 'string' ? metadata.waitingOn : undefined,
+                    attentionReasons: Array.isArray(metadata.attentionReasons) ? metadata.attentionReasons : undefined,
+                    cacheWarmEnabled: metadata.cacheWarmEnabled === true,
+                    cacheWarmNextAt: typeof metadata.cacheWarmNextAt === 'number' ? metadata.cacheWarmNextAt : undefined,
+                    cacheWarmLastAt: typeof metadata.cacheWarmLastAt === 'number' ? metadata.cacheWarmLastAt : undefined,
+                    cacheWarmLastStatus: metadata.cacheWarmLastStatus === 'success' || metadata.cacheWarmLastStatus === 'failed'
+                        ? metadata.cacheWarmLastStatus
+                        : undefined,
                 };
             });
+
+            SessionCacheWarmScheduler.getInstance().syncSessions(children);
 
             return { success: true, children };
         } catch (error) {
@@ -728,6 +765,48 @@ export async function registerSessionHandlers() {
             return { success: true };
         } catch (error) {
             console.error('[SessionHandlers] Failed to set session parent:', error);
+            return { success: false, error: String(error) };
+        }
+    });
+
+    safeHandle('sessions:attach-to-worktree', async (_event, payload: {
+        sessionId: string;
+        worktreeId: string;
+        workspacePath: string;
+    }) => {
+        try {
+            const { sessionId, worktreeId, workspacePath } = payload;
+            const session = await AISessionsRepository.get(sessionId);
+            if (!session) return { success: false, error: 'Session not found' };
+            if (session.workspacePath !== workspacePath) {
+                return { success: false, error: 'Session does not belong to this workspace' };
+            }
+
+            const db = getDatabase();
+            if (!db) return { success: false, error: 'Database not initialized' };
+            const worktree = await createWorktreeStore(db).get(worktreeId);
+            if (!worktree || worktree.projectPath !== workspacePath) {
+                return { success: false, error: 'Worktree not found in this workspace' };
+            }
+            if (worktree.isArchived) {
+                return { success: false, error: 'Cannot attach a session to an archived worktree' };
+            }
+
+            const state = getSessionStateManager().getSessionState(sessionId);
+            if (state?.status === 'running' || state?.isStreaming) {
+                return { success: false, error: 'Wait for the session turn to finish before moving it' };
+            }
+
+            ProviderFactory.destroyProvider(sessionId);
+            await getTerminalSessionManager().destroyTerminal(sessionId);
+            await AISessionsRepository.updateMetadata(sessionId, {
+                worktreeId,
+                parentSessionId: null,
+            });
+
+            return { success: true };
+        } catch (error) {
+            console.error('[SessionHandlers] Failed to attach session to worktree:', error);
             return { success: false, error: String(error) };
         }
     });

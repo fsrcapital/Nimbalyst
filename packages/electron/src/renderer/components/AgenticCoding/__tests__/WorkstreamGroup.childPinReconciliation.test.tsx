@@ -235,8 +235,7 @@ describe('expanded workstream child pin reconciliation', () => {
     );
 
     expect(childTitles()).toEqual(['Target', 'Sibling']);
-    expect(within(childRows()[0]).getByTestId('relative-time').parentElement?.parentElement
-      ?.querySelector('[data-icon="push_pin"]')).not.toBeNull();
+    expect(childRows()[0].querySelector('[data-icon="push_pin"]')).not.toBeNull();
 
     fireEvent.contextMenu(childRows()[0]);
     fireEvent.click(screen.getByRole('button', { name: 'Unpin' }));
@@ -347,5 +346,70 @@ describe('expanded workstream child pin reconciliation', () => {
     ]);
 
     expect(workstreamChildrenNeedRefresh(cachedChildren, 2, registryAfterPin)).toBe(false);
+  });
+});
+
+describe('worktree session drop', () => {
+  it('attaches a dragged standalone session to the target worktree', async () => {
+    const invoke = vi.fn().mockResolvedValue({ success: true });
+    const previousElectronAPI = window.electronAPI;
+    Object.defineProperty(window, 'electronAPI', {
+      configurable: true,
+      value: { ...previousElectronAPI, invoke },
+    });
+
+    try {
+      render(
+        <WorkstreamGroup
+          type="worktree"
+          id="worktree-1"
+          title="Feature branch"
+          isExpanded
+          isActive={false}
+          onToggle={vi.fn()}
+          onSelect={vi.fn()}
+          sessions={[]}
+          activeSessionId={null}
+          onSessionSelect={vi.fn()}
+          projectPath={workspacePath}
+          worktree={{
+            id: 'worktree-1',
+            name: 'feature-branch',
+            path: 'D:/workspace/.worktrees/feature-branch',
+            branch: 'feature-branch',
+          }}
+        />,
+      );
+
+      const header = screen.getByTestId('worktree-group').querySelector('.workstream-group-header');
+      expect(header).not.toBeNull();
+      const payload = JSON.stringify({
+        sessionId: 'standalone-session',
+        parentId: null,
+        workspacePath,
+        isWorktreeSession: false,
+      });
+      const dataTransfer = {
+        types: ['application/x-nimbalyst-session'],
+        getData: vi.fn(() => payload),
+        dropEffect: 'none',
+      };
+
+      fireEvent.dragOver(header!, { dataTransfer });
+      fireEvent.drop(header!, { dataTransfer });
+
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith('sessions:attach-to-worktree', {
+          sessionId: 'standalone-session',
+          worktreeId: 'worktree-1',
+          workspacePath,
+        });
+      });
+    } finally {
+      Object.defineProperty(window, 'electronAPI', {
+        configurable: true,
+        value: previousElectronAPI,
+      });
+    }
   });
 });

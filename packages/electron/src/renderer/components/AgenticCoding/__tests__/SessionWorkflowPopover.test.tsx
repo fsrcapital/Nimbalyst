@@ -155,6 +155,22 @@ describe("SessionWorkflowPopover", () => {
     });
   });
 
+  it("enables prompt-cache warming from the session workflow form", async () => {
+    render(<SessionWorkflowPopover sessionId="session-warm" isRowHovering />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit session workflow" }));
+    fireEvent.click(screen.getByLabelText("Keep warm until unchecked"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(window.electronAPI.invoke).toHaveBeenCalledWith(
+        "sessions:set-cache-warm",
+        "session-warm",
+        true
+      );
+    });
+  });
+
   it("keeps the editor open and reports a persistence failure", async () => {
     vi.mocked(window.electronAPI.invoke).mockResolvedValueOnce({
       success: false,

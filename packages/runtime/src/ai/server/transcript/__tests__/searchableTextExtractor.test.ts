@@ -59,6 +59,16 @@ describe('searchableTextExtractor', () => {
       expect(r).toEqual({ searchableText: null, messageKind: 'system' });
     });
 
+    it('classifies cache_warm prompts as system', () => {
+      const r = extractSearchable({
+        source: 'claude-code',
+        direction: 'input',
+        content: JSON.stringify({ prompt: 'keep alive' }),
+        metadata: { promptOrigin: 'cache_warm' },
+      });
+      expect(r).toEqual({ searchableText: null, messageKind: 'system' });
+    });
+
     it('classifies tool_result blocks as tool', () => {
       const r = extractSearchable({
         source: 'claude-code',

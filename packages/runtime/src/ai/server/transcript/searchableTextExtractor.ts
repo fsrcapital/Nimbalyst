@@ -78,7 +78,7 @@ function extractClaudeCodeInput(parsed: unknown, content: string, metadata?: Rec
       if (isSystemReminder(prompt, metadata)) {
         return { searchableText: null, messageKind: 'system' };
       }
-      if (metadata?.promptOrigin === 'wakeup_resume') {
+      if (metadata?.promptOrigin === 'wakeup_resume' || metadata?.promptOrigin === 'cache_warm') {
         return { searchableText: null, messageKind: 'system' };
       }
       return { searchableText: nonEmpty(prompt), messageKind: 'user' };

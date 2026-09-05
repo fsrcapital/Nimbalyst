@@ -50,6 +50,10 @@ export interface SessionMeta {
   waitingOn?: string;
   attentionReasons?: SessionAttentionReason[];
   needsAttention?: boolean;
+  cacheWarmEnabled?: boolean;
+  cacheWarmNextAt?: number;
+  cacheWarmLastAt?: number;
+  cacheWarmLastStatus?: 'success' | 'failed';
   // Branch tracking - SEPARATE from hierarchical parentSessionId
   branchedFromSessionId?: string;
   branchPointMessageId?: number;
