@@ -7,7 +7,7 @@
  * Menu items are shown conditionally based on which callbacks are provided.
  * Internal actions (copy ID, export, share, set phase) are always available.
  */
-import React, { useState, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react';
 import { useAtomValue, useSetAtom } from 'jotai';
 import { MaterialSymbol, copyToClipboard } from '@nimbalyst/runtime';
 import { sessionShareAtom, shareKeysAtom, removeSessionShareAtom, buildShareUrl } from '../../store';
@@ -66,7 +66,25 @@ export const SessionContextMenu: React.FC<SessionContextMenuProps> = ({
   const [showPhaseSubmenu, setShowPhaseSubmenu] = useState(false);
   const [submenuFlipped, setSubmenuFlipped] = useState(false);
   const submenuParentRef = useRef<HTMLDivElement>(null);
+  const submenuCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const setSessionPhase = useSetAtom(setSessionPhaseAtom);
+
+  const cancelSubmenuClose = useCallback(() => {
+    if (submenuCloseTimerRef.current) {
+      clearTimeout(submenuCloseTimerRef.current);
+      submenuCloseTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleSubmenuClose = useCallback(() => {
+    cancelSubmenuClose();
+    submenuCloseTimerRef.current = setTimeout(() => {
+      setShowPhaseSubmenu(false);
+      submenuCloseTimerRef.current = null;
+    }, 150);
+  }, [cancelSubmenuClose]);
+
+  useEffect(() => cancelSubmenuClose, [cancelSubmenuClose]);
 
   // Share state
   const shareInfo = useAtomValue(sessionShareAtom(sessionId));
@@ -181,7 +199,6 @@ export const SessionContextMenu: React.FC<SessionContextMenuProps> = ({
         {...menu.getFloatingProps()}
         className="session-context-menu z-[1000] min-w-[140px] p-1 bg-[var(--nim-bg)] border border-[var(--nim-border)] rounded-md shadow-[0_4px_12px_rgba(0,0,0,0.15)]"
         onClick={(e) => e.stopPropagation()}
-        onMouseLeave={onClose}
       >
         {/* Group 1: Organize (most frequent) */}
         {onRename && (
@@ -201,6 +218,7 @@ export const SessionContextMenu: React.FC<SessionContextMenuProps> = ({
           ref={submenuParentRef}
           className="relative"
           onMouseEnter={() => {
+            cancelSubmenuClose();
             // Check if submenu would overflow right edge
             if (submenuParentRef.current) {
               const rect = submenuParentRef.current.getBoundingClientRect();
@@ -209,7 +227,7 @@ export const SessionContextMenu: React.FC<SessionContextMenuProps> = ({
             }
             setShowPhaseSubmenu(true);
           }}
-          onMouseLeave={() => setShowPhaseSubmenu(false)}
+          onMouseLeave={scheduleSubmenuClose}
         >
           <button
             className={menuItemClass}
@@ -223,7 +241,11 @@ export const SessionContextMenu: React.FC<SessionContextMenuProps> = ({
             <MaterialSymbol icon="chevron_right" size={12} />
           </button>
           {showPhaseSubmenu && (
-            <div className={`absolute top-0 min-w-[140px] p-1 bg-[var(--nim-bg)] border border-[var(--nim-border)] rounded-md shadow-[0_4px_12px_rgba(0,0,0,0.15)] z-[1001] ${submenuFlipped ? 'right-full mr-0.5' : 'left-full ml-0.5'}`}>
+            <div
+              className={`absolute top-0 min-w-[140px] p-1 bg-[var(--nim-bg)] border border-[var(--nim-border)] rounded-md shadow-[0_4px_12px_rgba(0,0,0,0.15)] z-[1001] ${submenuFlipped ? 'right-full mr-0.5' : 'left-full ml-0.5'}`}
+              onMouseEnter={cancelSubmenuClose}
+              onMouseLeave={scheduleSubmenuClose}
+            >
               {SESSION_PHASE_COLUMNS.map((col) => (
                 <button
                   key={col.value}

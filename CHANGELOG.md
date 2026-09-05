@@ -10,12 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 <!-- New features go here -->
+- Sessions can keep their prompt cache warm until manually disabled from the workflow form.
 
 ### Changed
 <!-- Changes to existing functionality go here -->
 
 ### Fixed
 <!-- Bug fixes go here -->
+- Session Kanban phase menus stay open while moving the pointer into the submenu.
+- Agent workflow discovery no longer scans unrelated plugin files that could freeze session and model selection.
+- Sessions nested under workstreams and worktrees now show the same status and workflow details as standalone sessions.
+- Standalone sessions can be dragged into worktrees and resume from the worktree checkout on their next turn.
 
 ### Removed
 <!-- Removed features go here -->
