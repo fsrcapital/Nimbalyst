@@ -2184,6 +2184,44 @@ export const showArchivedSessionsAtom = atom<boolean>(false);
  *   If provided, uses this value instead of reading from showArchivedSessionsAtom.
  *   This avoids race conditions when the atom is updated but not yet committed.
  */
+export function mapSessionListEntryToMeta(s: any, workspacePath: string): SessionMeta {
+  return {
+    id: s.id,
+    title: s.title || 'Untitled Session',
+    createdAt: s.createdAt,
+    updatedAt: s.updatedAt,
+    provider: s.provider || 'claude',
+    model: s.model,
+    sessionType: s.sessionType || 'session',
+    agentRole: s.agentRole || 'standard',
+    createdBySessionId: s.createdBySessionId || null,
+    messageCount: s.messageCount || 0,
+    workspaceId: workspacePath,
+    isArchived: s.isArchived || false,
+    isPinned: s.isPinned || false,
+    parentSessionId: s.parentSessionId || null,
+    worktreeId: s.worktreeId || null,
+    childCount: s.childCount || 0,
+    uncommittedCount: s.uncommittedCount || 0,
+    ...(s.phase && { phase: s.phase }),
+    ...(s.tags && { tags: s.tags }),
+    ...(s.linkedTrackerItemIds && { linkedTrackerItemIds: s.linkedTrackerItemIds }),
+    ...(s.agentRole && { agentRole: s.agentRole }),
+    ...(s.createdBySessionId !== undefined && { createdBySessionId: s.createdBySessionId }),
+    ...(typeof s.cacheWarmEnabled === 'boolean' && { cacheWarmEnabled: s.cacheWarmEnabled }),
+    ...(typeof s.cacheWarmNextAt === 'number' && { cacheWarmNextAt: s.cacheWarmNextAt }),
+    ...(typeof s.cacheWarmLastAt === 'number' && { cacheWarmLastAt: s.cacheWarmLastAt }),
+    ...((s.cacheWarmLastStatus === 'success' || s.cacheWarmLastStatus === 'failed') && {
+      cacheWarmLastStatus: s.cacheWarmLastStatus,
+    }),
+    ...(typeof s.myNotes === 'string' && { myNotes: s.myNotes }),
+    ...(typeof s.nextAction === 'string' && { nextAction: s.nextAction }),
+    ...(typeof s.waitingOn === 'string' && { waitingOn: s.waitingOn }),
+    ...(Array.isArray(s.attentionReasons) && { attentionReasons: s.attentionReasons }),
+    ...(typeof s.needsAttention === 'boolean' && { needsAttention: s.needsAttention }),
+  };
+}
+
 export const refreshSessionListAtom = atom(
   null,
   async (get, set, includeArchivedOverride?: boolean) => {
@@ -2204,32 +2242,7 @@ export const refreshSessionListAtom = atom(
         // Map IPC results directly into registry (single pass, no intermediate type)
         const registry = new Map<string, SessionMeta>();
         for (const s of result.sessions) {
-          registry.set(s.id, {
-            id: s.id,
-            title: s.title || 'Untitled Session',
-            createdAt: s.createdAt,
-            updatedAt: s.updatedAt,
-            provider: s.provider || 'claude',
-            model: s.model,
-            sessionType: s.sessionType || 'session',
-            agentRole: s.agentRole || 'standard',
-            createdBySessionId: s.createdBySessionId || null,
-            messageCount: s.messageCount || 0,
-            workspaceId: workspacePath,
-            isArchived: s.isArchived || false,
-            isPinned: s.isPinned || false,
-            parentSessionId: s.parentSessionId || null,
-            worktreeId: s.worktreeId || null,
-            childCount: s.childCount || 0,
-            uncommittedCount: s.uncommittedCount || 0,
-            // Kanban board phase and tags from metadata JSONB
-            ...(s.phase && { phase: s.phase }),
-            ...(s.tags && { tags: s.tags }),
-            // Linked tracker item IDs from metadata JSONB
-            ...(s.linkedTrackerItemIds && { linkedTrackerItemIds: s.linkedTrackerItemIds }),
-            ...(s.agentRole && { agentRole: s.agentRole }),
-            ...(s.createdBySessionId !== undefined && { createdBySessionId: s.createdBySessionId }),
-          });
+          registry.set(s.id, mapSessionListEntryToMeta(s, workspacePath));
 
           // Initialize unread state from database metadata (for cross-device sync)
           if (s.hasUnread) {

@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect } from 'vitest';
 import type { SessionData, TranscriptViewMessage } from '@nimbalyst/runtime/ai/server/types';
-import { preserveReloadIdentity } from '../atoms/sessions';
+import { mapSessionListEntryToMeta, preserveReloadIdentity } from '../atoms/sessions';
 
 function makeMessage(id: number, text: string): TranscriptViewMessage {
   return {
@@ -89,5 +89,38 @@ describe('preserveReloadIdentity', () => {
 
     expect(merged.metadata?.currentTeammates).toBe(currentTeammates);
     expect(merged.metadata?.sessionStatus).toBe('running');
+  });
+});
+
+describe('mapSessionListEntryToMeta', () => {
+  it('hydrates persisted cache warming and workflow metadata', () => {
+    const meta = mapSessionListEntryToMeta({
+      id: 'session-1',
+      title: 'Warm session',
+      createdAt: 1,
+      updatedAt: 2,
+      provider: 'claude-code',
+      cacheWarmEnabled: true,
+      cacheWarmNextAt: 1234,
+      cacheWarmLastAt: 1000,
+      cacheWarmLastStatus: 'success',
+      myNotes: 'Keep overnight',
+      nextAction: 'Resume tomorrow',
+      waitingOn: 'Review',
+      attentionReasons: ['blocked'],
+      needsAttention: true,
+    }, 'C:/workspace');
+
+    expect(meta).toMatchObject({
+      cacheWarmEnabled: true,
+      cacheWarmNextAt: 1234,
+      cacheWarmLastAt: 1000,
+      cacheWarmLastStatus: 'success',
+      myNotes: 'Keep overnight',
+      nextAction: 'Resume tomorrow',
+      waitingOn: 'Review',
+      attentionReasons: ['blocked'],
+      needsAttention: true,
+    });
   });
 });

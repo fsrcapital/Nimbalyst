@@ -171,6 +171,30 @@ describe("SessionWorkflowPopover", () => {
     });
   });
 
+  it("shows persisted warming as checked and can disable it", async () => {
+    render(
+      <SessionWorkflowPopover
+        sessionId="session-warm-active"
+        cacheWarmEnabled
+        isRowHovering
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit session workflow" }));
+    const checkbox = screen.getByLabelText("Keep warm until unchecked") as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(window.electronAPI.invoke).toHaveBeenCalledWith(
+        "sessions:set-cache-warm",
+        "session-warm-active",
+        false
+      );
+    });
+  });
+
   it("keeps the editor open and reports a persistence failure", async () => {
     vi.mocked(window.electronAPI.invoke).mockResolvedValueOnce({
       success: false,
