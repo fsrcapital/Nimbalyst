@@ -1,4 +1,5 @@
 import type { SessionMeta } from '../../store';
+import { mapSessionListEntryToMeta } from '../../store/atoms/sessions';
 
 type StateUpdater<T> = (updater: (previous: T) => T) => void;
 
@@ -12,6 +13,13 @@ interface ReconcileSessionPinToggleOptions {
   }) => void;
   setSessions: StateUpdater<SessionMeta[]>;
   setWorkstreamChildrenCache: StateUpdater<Map<string, SessionMeta[]>>;
+}
+
+export function mapWorkstreamChildListEntry(
+  entry: unknown,
+  workspacePath: string,
+): SessionMeta {
+  return mapSessionListEntryToMeta(entry, workspacePath);
 }
 
 export function patchWorkstreamChildPin(

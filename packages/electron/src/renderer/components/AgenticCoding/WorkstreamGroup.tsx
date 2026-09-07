@@ -7,6 +7,7 @@ import {
   sessionPendingPromptAtom,
   sessionHasPendingInteractivePromptAtom,
   sessionListTitleAtom,
+  sessionListMetaAtom,
   groupSessionStatusAtom,
   reparentSessionAtom,
   refreshSessionListAtom,
@@ -1088,7 +1089,7 @@ interface WorkstreamSessionItemProps {
 }
 
 const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
-  session,
+  session: cachedSession,
   parentType,
   isActive,
   onClick,
@@ -1100,6 +1101,8 @@ const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
   onBranch,
   onRemoveFromWorkstream,
 }) => {
+  const currentSession = useAtomValue(sessionListMetaAtom(cachedSession.id));
+  const session = currentSession ?? cachedSession;
   const [isHovering, setIsHovering] = useState(false);
   const [showContextMenu, setShowContextMenu] = useState(false);
   const [contextMenuPosition, setContextMenuPosition] = useState({ x: 0, y: 0 });

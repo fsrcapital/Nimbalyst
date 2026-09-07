@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 <!-- New features go here -->
-- Sessions can keep their prompt cache warm until manually disabled from the workflow form, with the enabled state restored accurately after session-list refreshes.
+- Sessions can keep their prompt cache warm until manually disabled from the workflow form, with the enabled state restored and synchronized for standalone and nested workstream sessions.
 
 ### Changed
 <!-- Changes to existing functionality go here -->

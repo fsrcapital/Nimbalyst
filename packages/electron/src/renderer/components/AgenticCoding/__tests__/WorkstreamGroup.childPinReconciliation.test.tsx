@@ -3,6 +3,10 @@ import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
+const { registryMetaById } = vi.hoisted(() => ({
+  registryMetaById: new Map<string, unknown>(),
+}));
+
 vi.mock('jotai', async () => {
   const actual = await vi.importActual<typeof import('jotai')>('jotai');
   return {
@@ -33,6 +37,7 @@ vi.mock('../../../store', () => {
     sessionPendingPromptAtom: () => value(false),
     sessionHasPendingInteractivePromptAtom: () => value(false),
     sessionListTitleAtom: () => value(null),
+    sessionListMetaAtom: (sessionId: string) => value(registryMetaById.get(sessionId)),
     groupSessionStatusAtom: () => value({
       hasPendingInteractivePrompt: false,
       hasProcessing: false,
@@ -67,11 +72,13 @@ vi.mock('../SessionWorkflowPopover', () => ({
     myNotes,
     nextAction,
     waitingOn,
+    cacheWarmEnabled,
   }: {
     sessionId: string;
     myNotes?: string;
     nextAction?: string;
     waitingOn?: string;
+    cacheWarmEnabled?: boolean;
   }) => (
     <button
       type="button"
@@ -80,6 +87,7 @@ vi.mock('../SessionWorkflowPopover', () => ({
       data-my-notes={myNotes}
       data-next-action={nextAction}
       data-waiting-on={waitingOn}
+      data-cache-warm-enabled={String(cacheWarmEnabled === true)}
     />
   ),
 }));
@@ -101,6 +109,7 @@ vi.mock('../SessionContextMenu', () => ({
 import type { SessionMeta } from '../../../store';
 import { WorkstreamGroup } from '../WorkstreamGroup';
 import {
+  mapWorkstreamChildListEntry,
   reconcileSessionPinToggle,
   workstreamChildrenNeedRefresh,
 } from '../workstreamChildPinReconciliation';
@@ -168,9 +177,34 @@ function renderExpandedWorkstream(
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  registryMetaById.clear();
 });
 
 describe('expanded workstream child pin reconciliation', () => {
+  it('hydrates persisted cache warming for nested session rows', () => {
+    const child = mapWorkstreamChildListEntry({
+      id: targetId,
+      title: 'Target',
+      provider: 'claude-code',
+      createdAt: 100,
+      updatedAt: 200,
+      parentSessionId: parentId,
+      cacheWarmEnabled: true,
+      cacheWarmNextAt: 1234,
+      cacheWarmLastAt: 1000,
+      cacheWarmLastStatus: 'success',
+    }, workspacePath);
+
+    expect(child).toMatchObject({
+      id: targetId,
+      parentSessionId: parentId,
+      cacheWarmEnabled: true,
+      cacheWarmNextAt: 1234,
+      cacheWarmLastAt: 1000,
+      cacheWarmLastStatus: 'success',
+    });
+  });
+
   it('offers notes and workflow editing on nested session rows', () => {
     renderExpandedWorkstream([
       session({
@@ -189,6 +223,27 @@ describe('expanded workstream child pin reconciliation', () => {
     expect(workflowButton.dataset.myNotes).toBe('Review the final diff');
     expect(workflowButton.dataset.nextAction).toBe('Run the smoke test');
     expect(workflowButton.dataset.waitingOn).toBe('Test environment');
+  });
+
+  it('uses current registry metadata after nested cache warming is disabled', () => {
+    const cached = session({
+      id: targetId,
+      title: 'Target',
+      cacheWarmEnabled: true,
+      cacheWarmNextAt: 1234,
+    });
+    registryMetaById.set(targetId, {
+      ...cached,
+      cacheWarmEnabled: false,
+      cacheWarmNextAt: undefined,
+    });
+
+    renderExpandedWorkstream([cached], vi.fn());
+
+    const workflowButton = within(childRows()[0]).getByRole('button', {
+      name: 'Edit session workflow',
+    });
+    expect(workflowButton.dataset.cacheWarmEnabled).toBe('false');
   });
 
   it('reconciles true -> false without refresh or removal', async () => {

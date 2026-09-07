@@ -76,6 +76,7 @@ import { WorkspaceSummaryHeader, generateWorkspaceAccentColor } from '../Workspa
 import { errorNotificationService } from '../../services/ErrorNotificationService';
 import { FloatingPortal, useFloatingMenu } from '../../hooks/useFloatingMenu';
 import {
+  mapWorkstreamChildListEntry,
   patchWorkstreamChildPin,
   reconcileSessionPinToggle,
   workstreamChildrenNeedRefresh,
@@ -2684,28 +2685,9 @@ const SessionHistoryComponent: React.FC = () => {
                 return null;
               }
 
-              const children: SessionItem[] = result.children.map((c: any) => ({
-                id: c.id,
-                title: c.title || 'Untitled Session',
-                createdAt: c.createdAt,
-                updatedAt: c.updatedAt,
-                provider: c.provider || 'claude',
-                model: c.model,
-                sessionType: c.sessionType || 'session',
-                mode: c.mode || null,
-                messageCount: c.messageCount || 0,
-                workspaceId: workspacePath,
-                isArchived: c.isArchived || false,
-                isPinned: c.isPinned || false,
-                worktreeId: c.worktreeId || null,
-                parentSessionId: c.parentSessionId || null,
-                childCount: c.childCount || 0,
-                uncommittedCount: c.uncommittedCount || 0,
-                // Metadata fields for TrackerPanel and kanban
-                ...(c.phase && { phase: c.phase }),
-                ...(c.tags && { tags: c.tags }),
-                ...(c.linkedTrackerItemIds && { linkedTrackerItemIds: c.linkedTrackerItemIds }),
-              }));
+              const children: SessionItem[] = result.children.map((child: unknown) =>
+                mapWorkstreamChildListEntry(child, workspacePath)
+              );
 
               return { sessionId: session.id, children };
             } catch (err) {

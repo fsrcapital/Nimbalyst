@@ -846,6 +846,15 @@ export const sessionListTitleAtom = atomFamily((sessionId: string) =>
 );
 
 /**
+ * Current normalized list metadata for one session.
+ * Nested rows keep structural membership in a local cache, but mutable fields
+ * such as workflow and cache-warming state remain authoritative here.
+ */
+export const sessionListMetaAtom = atomFamily((sessionId: string) =>
+  atom((get) => get(sessionRegistryAtom).get(sessionId))
+);
+
+/**
  * Derived: Session provider from sessionData.
  * For use in tabs and lists where the provider icon is needed.
  * Falls back to sessionRegistryAtom when sessionStoreAtom hasn't been loaded yet.
@@ -2192,6 +2201,7 @@ export function mapSessionListEntryToMeta(s: any, workspacePath: string): Sessio
     updatedAt: s.updatedAt,
     provider: s.provider || 'claude',
     model: s.model,
+    mode: s.mode || null,
     sessionType: s.sessionType || 'session',
     agentRole: s.agentRole || 'standard',
     createdBySessionId: s.createdBySessionId || null,
