@@ -700,7 +700,8 @@ export class AgentWorkflowService {
     sourceId: string,
     descriptors: AgentWorkflowDescriptor[],
   ): void {
-    if (!fs.existsSync(pluginRoot)) {
+    const commandsRoot = path.join(pluginRoot, 'commands');
+    if (!fs.existsSync(commandsRoot)) {
       return;
     }
 
@@ -716,9 +717,6 @@ export class AgentWorkflowService {
         const fullPath = path.join(currentPath, entry.name);
 
         if (isDirectoryEntry(entry, fullPath)) {
-          if (entry.name === '.claude-plugin' || entry.name === 'skills') {
-            continue;
-          }
           recurse(fullPath);
           continue;
         }
@@ -727,10 +725,7 @@ export class AgentWorkflowService {
           continue;
         }
 
-        const commandsRoot = path.join(pluginRoot, 'commands');
-        const relativePath = fullPath.startsWith(`${commandsRoot}${path.sep}`)
-          ? path.relative(commandsRoot, fullPath)
-          : path.relative(pluginRoot, fullPath);
+        const relativePath = path.relative(commandsRoot, fullPath);
         const command = parseCommandFile(fullPath, 'plugin', relativePath);
         if (!command || !validateCommand(command)) {
           continue;
@@ -744,7 +739,7 @@ export class AgentWorkflowService {
       }
     };
 
-    recurse(pluginRoot);
+    recurse(commandsRoot);
   }
 
   private scanCommandDirectory(

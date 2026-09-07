@@ -414,6 +414,40 @@ Use this when the user needs a helper workflow.
     expect(codexEntries.some(entry => entry.name === 'legacy-tools-helper')).toBe(true);
   });
 
+  it('ignores markdown files outside a legacy Claude plugin commands directory', async () => {
+    const pluginRoot = path.join(workspacePath, 'legacy-plugin');
+    fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+
+    fs.writeFileSync(
+      path.join(pluginRoot, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'legacy-tools', version: '0.1.0', author: { name: 'Nimbalyst' } }, null, 2),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(pluginRoot, 'commands', 'inspect.md'),
+      `---\ndescription: Inspect the current change\n---\n\nRead the diff.\n`,
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(pluginRoot, 'accidental.md'),
+      `---\ndescription: This is not a plugin command\n---\n\nIgnore this file.\n`,
+      'utf-8',
+    );
+
+    const service = new AgentWorkflowService(workspacePath, {
+      userHomePath,
+      extensionDirectoriesLoader: async () => [],
+      nativeClaudePluginPathsLoader: async () => [{ type: 'local', path: pluginRoot }],
+      releaseChannelLoader: () => 'stable',
+    });
+
+    const entries = await service.listEntries({ provider: 'claude-code' });
+
+    expect(entries.some(entry => entry.name === 'legacy-tools:inspect')).toBe(true);
+    expect(entries.some(entry => entry.description === 'This is not a plugin command')).toBe(false);
+  });
+
   // NIM-845: a claude-code-cli session whose resolved `claude` is too old to
   // accept `--plugin-dir` can't load extension Claude-plugins, so their namespaced
   // commands (`legacy-tools:inspect`) won't resolve. The picker must not offer
