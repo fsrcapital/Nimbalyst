@@ -32,6 +32,27 @@ describe('MarkdownRenderer file-path autolinking', () => {
     expect(onOpenFile).toHaveBeenCalledWith('src/a/foo.ts', { line: 42, column: 7 });
   });
 
+  it('offers default-app and copy-path actions from a file link context menu', () => {
+    const onOpenFileInDefaultApp = vi.fn();
+    const onCopyFilePath = vi.fn();
+    render(
+      <MarkdownRenderer
+        content="[the document](/workspace/docs/design.md:42)"
+        onOpenFile={vi.fn()}
+        onOpenFileInDefaultApp={onOpenFileInDefaultApp}
+        onCopyFilePath={onCopyFilePath}
+      />,
+    );
+
+    fireEvent.contextMenu(screen.getByText('the document'), { clientX: 25, clientY: 50 });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open in Default App' }));
+    expect(onOpenFileInDefaultApp).toHaveBeenCalledWith('/workspace/docs/design.md');
+
+    fireEvent.contextMenu(screen.getByText('the document'), { clientX: 25, clientY: 50 });
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy Path' }));
+    expect(onCopyFilePath).toHaveBeenCalledWith('/workspace/docs/design.md');
+  });
+
   it('does not autolink when no onOpenFile handler is provided', () => {
     const { container } = render(
       <MarkdownRenderer content="Check packages/electron/src/foo.ts now" />,

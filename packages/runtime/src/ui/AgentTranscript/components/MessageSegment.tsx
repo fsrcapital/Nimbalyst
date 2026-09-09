@@ -29,6 +29,10 @@ interface MessageSegmentProps {
   isLastMessage?: boolean; // For context limit widget to show compact button only on last message
   /** Optional: Open a file in the editor (makes file paths clickable) */
   onOpenFile?: (filePath: string) => void;
+  /** Optional: Open a transcript file link in the operating system's default app. */
+  onOpenFileInDefaultApp?: (filePath: string) => void;
+  /** Optional: Copy a transcript file link's resolved path. */
+  onCopyFilePath?: (filePath: string) => void;
   /** Optional: Navigate to a session by ID (for @@session reference links) */
   onOpenSession?: (sessionId: string) => void;
   /** Optional: Callback to trigger /compact command */
@@ -52,6 +56,8 @@ export const MessageSegment: React.FC<MessageSegmentProps> = ({
   sessionId,
   isLastMessage = false,
   onOpenFile,
+  onOpenFileInDefaultApp,
+  onCopyFilePath,
   onOpenSession,
   onCompact,
   provider,
@@ -242,6 +248,8 @@ export const MessageSegment: React.FC<MessageSegmentProps> = ({
           isUser={isUser}
           isSystemMessage={isSystemMessage}
           onOpenFile={onOpenFile}
+          onOpenFileInDefaultApp={onOpenFileInDefaultApp}
+          onCopyFilePath={onCopyFilePath}
           onOpenSession={onOpenSession}
           messageId={message.id}
         />

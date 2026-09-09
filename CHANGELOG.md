@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 <!-- Bug fixes go here -->
+- Response document links now offer Open in Default App and Copy Path on right-click.
 - Session Kanban phase menus stay open while moving the pointer into the submenu.
 - Agent workflow discovery no longer scans unrelated plugin files that could freeze session and model selection.
 - Sessions nested under workstreams and worktrees now show the same status and workflow details as standalone sessions.

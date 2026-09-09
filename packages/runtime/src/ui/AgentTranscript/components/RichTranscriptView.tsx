@@ -486,6 +486,10 @@ interface RichTranscriptViewProps {
   readFile?: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string }>;
   /** Optional: Open a file in the editor, optionally scrolled to a line */
   onOpenFile?: (filePath: string, location?: TranscriptFileLocation) => void;
+  /** Optional: Open a transcript file link in the operating system's default app. */
+  onOpenFileInDefaultApp?: (filePath: string) => void;
+  /** Optional: Copy a transcript file link's resolved path. */
+  onCopyFilePath?: (filePath: string) => void;
   /** Optional: Navigate to a session by ID (for @@session reference links) */
   onOpenSession?: (sessionId: string) => void;
   /** Optional: Callback to trigger /compact command */
@@ -1157,7 +1161,7 @@ export const extractEditsFromToolMessage = (message: TranscriptViewMessage): any
 export const RichTranscriptView = React.forwardRef<
   { scrollToMessage: (index: number) => void; scrollToTop: () => void },
   RichTranscriptViewProps
->(({ sessionId, sessionStatus, isProcessing, hasPendingInteractivePrompt, messages, provider, settings: propsSettings, onSettingsChange, showSettings, documentContext, workspacePath, renderEmptyExtra, hideEmptyHelp, readFile, onOpenFile, onOpenSession, onCompact, promptAdditions, currentTeammates, waitingForNoun, appStartTime, renderEmbeddedFile, canEmbedFile, loadToolCallDiffs, onSearchBarVisibilityChange, persistScrollState = true }, ref) => {
+>(({ sessionId, sessionStatus, isProcessing, hasPendingInteractivePrompt, messages, provider, settings: propsSettings, onSettingsChange, showSettings, documentContext, workspacePath, renderEmptyExtra, hideEmptyHelp, readFile, onOpenFile, onOpenFileInDefaultApp, onCopyFilePath, onOpenSession, onCompact, promptAdditions, currentTeammates, waitingForNoun, appStartTime, renderEmbeddedFile, canEmbedFile, loadToolCallDiffs, onSearchBarVisibilityChange, persistScrollState = true }, ref) => {
   const [collapsedMessages, setCollapsedMessages] = useState<Set<number>>(new Set());
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const scrollButtonRef = useRef<HTMLDivElement>(null);
@@ -1978,7 +1982,7 @@ export const RichTranscriptView = React.forwardRef<
                 <details className="rich-transcript-tool-details my-2">
                   <summary className="rich-transcript-tool-details-summary text-xs text-[var(--nim-text-faint)] cursor-pointer py-1 select-none hover:text-[var(--nim-text-muted)]">View full prompt</summary>
                   <div className="rich-transcript-tool-details-content mt-1 text-sm">
-                    <MarkdownRenderer content={prompt} isUser={false} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
+                    <MarkdownRenderer content={prompt} isUser={false} onOpenFile={onOpenFile} onOpenFileInDefaultApp={onOpenFileInDefaultApp} onCopyFilePath={onCopyFilePath} onOpenSession={onOpenSession} />
                   </div>
                 </details>
               )}
@@ -2022,9 +2026,9 @@ export const RichTranscriptView = React.forwardRef<
                   </summary>
                   <div className="rich-transcript-tool-details-content mt-1 text-sm">
                     {resultText ? (
-                      <MarkdownRenderer content={resultText} isUser={false} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
+                      <MarkdownRenderer content={resultText} isUser={false} onOpenFile={onOpenFile} onOpenFileInDefaultApp={onOpenFileInDefaultApp} onCopyFilePath={onCopyFilePath} onOpenSession={onOpenSession} />
                     ) : typeof tool.result === 'string' ? (
-                      <MarkdownRenderer content={tool.result} isUser={false} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
+                      <MarkdownRenderer content={tool.result} isUser={false} onOpenFile={onOpenFile} onOpenFileInDefaultApp={onOpenFileInDefaultApp} onCopyFilePath={onCopyFilePath} onOpenSession={onOpenSession} />
                     ) : (
                       <JSONViewer data={tool.result} maxHeight="16rem" />
                     )}
@@ -2181,7 +2185,7 @@ export const RichTranscriptView = React.forwardRef<
                 <span className="text-[10px] shrink-0">{formatMessageTime(message.createdAt?.getTime() ?? 0)}</span>
               </summary>
               <div className="teammate-content ml-5 mt-1 mb-0.5">
-                <MarkdownRenderer content={content} isUser={false} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
+                <MarkdownRenderer content={content} isUser={false} onOpenFile={onOpenFile} onOpenFileInDefaultApp={onOpenFileInDefaultApp} onCopyFilePath={onCopyFilePath} onOpenSession={onOpenSession} />
               </div>
             </details>
           ) : (
@@ -2371,6 +2375,8 @@ export const RichTranscriptView = React.forwardRef<
             sessionId={sessionId}
             isLastMessage={index === messages.length - 1}
             onOpenFile={onOpenFile}
+            onOpenFileInDefaultApp={onOpenFileInDefaultApp}
+            onCopyFilePath={onCopyFilePath}
             onOpenSession={onOpenSession}
             onCompact={onCompact}
             provider={provider}

@@ -113,7 +113,7 @@ import {
 } from '../../store/atoms/terminals';
 import { scrollToTeammateAtom, scrollToMessageAtom, requestOpenSessionAtom } from '../../store/atoms/agentMode';
 import { usePostHog } from 'posthog-js/react';
-import { setAgentModeSettingsAtom, showPromptAdditionsAtom, hasExternalEditorAtom, externalEditorNameAtom, openInExternalEditorAtom, defaultAgentModelAtom, defaultEffortLevelAtom, defaultThinkingModeAtom, chatShowToolCallsAtom, developerModeAtom } from '../../store/atoms/appSettings';
+import { setAgentModeSettingsAtom, showPromptAdditionsAtom, hasExternalEditorAtom, externalEditorNameAtom, openInExternalEditorAtom, copyFilePathAtom, defaultAgentModelAtom, defaultEffortLevelAtom, defaultThinkingModeAtom, chatShowToolCallsAtom, developerModeAtom } from '../../store/atoms/appSettings';
 import { supportsEffortLevel, supportsThinkingToggle, parseEffortLevel, resolveThinkingMode, type EffortLevel, type ThinkingMode } from '../../utils/modelUtils';
 import { buildPlanImplementationPrompt, resolvePlanFilePath } from '../../utils/pathUtils';
 import { resolveTranscriptClickPath } from '../../utils/resolveTranscriptClickPath';
@@ -1445,6 +1445,21 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
     onFileClick?.(resolveTranscriptClickPath(filePath, baseDir), location);
   }, [onFileClick, sessionWorktreePath, workspacePath]);
 
+  const copyFilePath = useSetAtom(copyFilePathAtom);
+  const resolveTranscriptFileActionPath = useCallback((filePath: string) => {
+    return resolveTranscriptClickPath(filePath, sessionWorktreePath ?? workspacePath);
+  }, [sessionWorktreePath, workspacePath]);
+  const handleOpenFileInDefaultApp = useCallback(async (filePath: string) => {
+    const resolvedPath = resolveTranscriptFileActionPath(filePath);
+    const result = await window.electronAPI.openInDefaultApp(resolvedPath);
+    if (!result.success) {
+      console.error('[SessionTranscript] Failed to open file in default app:', result.error);
+    }
+  }, [resolveTranscriptFileActionPath]);
+  const handleCopyFilePath = useCallback((filePath: string) => {
+    copyFilePath(resolveTranscriptFileActionPath(filePath));
+  }, [copyFilePath, resolveTranscriptFileActionPath]);
+
   const setRequestOpenSession = useSetAtom(requestOpenSessionAtom);
   const handleOpenSession = useCallback((targetSessionId: string) => {
     setRequestOpenSession(targetSessionId);
@@ -2513,6 +2528,8 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
             isProcessing={isLoading}
             hasPendingInteractivePrompt={hasPendingInteractivePrompt}
             onFileClick={handleFileClick}
+            onOpenFileInDefaultApp={handleOpenFileInDefaultApp}
+            onCopyFilePath={handleCopyFilePath}
             onOpenSession={handleOpenSession}
             hideSidebar={hideSidebar || mode === 'chat'}
             showFloatingActions={mode === 'agent'}

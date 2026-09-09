@@ -1,5 +1,15 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+import {
+  FloatingPortal,
+  flip,
+  offset,
+  shift,
+  useDismiss,
+  useFloating,
+  useInteractions,
+  useRole,
+} from '@floating-ui/react';
 import type { PluggableList } from 'unified';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -264,6 +274,10 @@ interface MarkdownRendererProps {
    *  the `:line[:col]` suffix when the link had one, so the editor can scroll
    *  there instead of opening at the top. */
   onOpenFile?: (filePath: string, location?: TranscriptFileLocation) => void;
+  /** Optional: Open a transcript file link with the operating system's default app. */
+  onOpenFileInDefaultApp?: (filePath: string) => void;
+  /** Optional: Copy the resolved path from a transcript file link. */
+  onCopyFilePath?: (filePath: string) => void;
   /**
    * @deprecated Session UUID references now render as a `SessionReferenceChip`
    * that opens the session via the `open-ai-session` event. Still accepted so
@@ -274,6 +288,114 @@ interface MarkdownRendererProps {
    *  per-block UI preferences (e.g. the OverflowWrapper Wrap toggle) so
    *  preferences survive react-markdown remounts during streaming. */
   messageId?: string | number;
+}
+
+interface TranscriptFileLinkProps {
+  href?: string;
+  children: React.ReactNode;
+  anchorProps: Record<string, unknown>;
+  style?: React.CSSProperties;
+  fileTarget: TranscriptFileTarget;
+  onOpenFile: (filePath: string, location?: TranscriptFileLocation) => void;
+  onOpenFileInDefaultApp?: (filePath: string) => void;
+  onCopyFilePath?: (filePath: string) => void;
+}
+
+function TranscriptFileLink({
+  href,
+  children,
+  anchorProps,
+  style,
+  fileTarget,
+  onOpenFile,
+  onOpenFileInDefaultApp,
+  onCopyFilePath,
+}: TranscriptFileLinkProps): React.ReactElement {
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const { refs, floatingStyles, context } = useFloating({
+    open: isMenuOpen,
+    onOpenChange: setIsMenuOpen,
+    placement: 'bottom-start',
+    middleware: [offset(4), flip({ padding: 8 }), shift({ padding: 8 })],
+  });
+  const dismiss = useDismiss(context);
+  const role = useRole(context, { role: 'menu' });
+  const { getFloatingProps } = useInteractions([dismiss, role]);
+  const hasContextActions = Boolean(onOpenFileInDefaultApp || onCopyFilePath);
+
+  const handleContextMenu = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    if (!hasContextActions) return;
+    event.preventDefault();
+    refs.setPositionReference({
+      getBoundingClientRect: () => DOMRect.fromRect({
+        x: event.clientX,
+        y: event.clientY,
+        width: 0,
+        height: 0,
+      }),
+    });
+    setIsMenuOpen(true);
+  };
+
+  return (
+    <>
+      <a
+        {...anchorProps}
+        ref={refs.setReference}
+        href={href}
+        onContextMenu={handleContextMenu}
+        onClick={(event) => {
+          event.preventDefault();
+          onOpenFile(fileTarget.path, transcriptFileLocation(fileTarget));
+        }}
+        style={{
+          color: 'var(--nim-primary)',
+          textDecoration: 'underline',
+          cursor: 'pointer',
+          ...(style || {}),
+        }}
+      >
+        {children}
+      </a>
+      {isMenuOpen && (
+        <FloatingPortal>
+          <div
+            ref={refs.setFloating}
+            className="transcript-file-link-context-menu min-w-44 rounded-md border border-nim bg-nim-secondary py-1 shadow-lg"
+            style={floatingStyles}
+            {...getFloatingProps()}
+          >
+            {onOpenFileInDefaultApp && (
+              <button
+                type="button"
+                role="menuitem"
+                className="block w-full border-0 bg-transparent px-3 py-1.5 text-left text-sm text-nim hover:bg-nim-hover"
+                onClick={() => {
+                  onOpenFileInDefaultApp(fileTarget.path);
+                  setIsMenuOpen(false);
+                }}
+              >
+                Open in Default App
+              </button>
+            )}
+            {onCopyFilePath && (
+              <button
+                type="button"
+                role="menuitem"
+                className="block w-full border-0 bg-transparent px-3 py-1.5 text-left text-sm text-nim hover:bg-nim-hover"
+                onClick={() => {
+                  onCopyFilePath(fileTarget.path);
+                  setIsMenuOpen(false);
+                }}
+              >
+                Copy Path
+              </button>
+            )}
+          </div>
+        </FloatingPortal>
+      )}
+    </>
+  );
 }
 
 function safeDecodeURIComponent(value: string): string {
@@ -490,6 +612,8 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
   isUser = false,
   isSystemMessage = false,
   onOpenFile,
+  onOpenFileInDefaultApp,
+  onCopyFilePath,
   messageId
 }) => {
   // Stable per-block key for the OverflowWrapper wrap-preference cache.
@@ -791,6 +915,21 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
               resolvedAutolink ?? (onOpenFile ? resolveTranscriptFileTargetFromHref(href) : null);
             const filePath = fileTarget?.path ?? null;
             const isInternalLink = Boolean(filePath) || appActionLink;
+            if (fileTarget && filePath && onOpenFile) {
+              return (
+                <TranscriptFileLink
+                  href={href}
+                  anchorProps={props}
+                  style={style}
+                  fileTarget={fileTarget}
+                  onOpenFile={onOpenFile}
+                  onOpenFileInDefaultApp={onOpenFileInDefaultApp}
+                  onCopyFilePath={onCopyFilePath}
+                >
+                  {children}
+                </TranscriptFileLink>
+              );
+            }
             return (
               <a
                 {...props}
@@ -803,10 +942,6 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({
                     event.stopPropagation();
                     dispatchAppActionHref(href);
                     return;
-                  }
-                  if (filePath && onOpenFile) {
-                    event.preventDefault();
-                    onOpenFile(filePath, transcriptFileLocation(fileTarget));
                   }
                 }}
                 style={{
