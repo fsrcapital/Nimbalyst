@@ -3,7 +3,7 @@ import test from "node:test";
 import { decryptText, deriveEncryptionKey } from "../lib/crypto.ts";
 import { accountFromPayload, parsePairingPayload, syncHttpOrigin } from "../lib/pairing.ts";
 import { cancelGatewaySession, createGatewaySession, getGatewayTranscript, listGatewaySessionCreationOptions, listGatewayWorkspaces, normalizeGatewayUrl, respondGatewayPrompt } from "../lib/gateway.ts";
-import { chooseWorkspacePath, sessionsForWorkspace } from "../lib/workspaceView.ts";
+import { chooseWorkspacePath, sessionsForWorkspace, withWorkspacePath, workspacePathFromUrl } from "../lib/workspaceView.ts";
 import { draftForSession, patchWorkflowDraft, startWorkflowDraft } from "../lib/workflowDraft.ts";
 import { formatSessionPhase } from "../lib/sessionPhase.ts";
 import { formatTranscriptTimestamp } from "../lib/transcriptTimestamp.ts";
@@ -353,6 +353,14 @@ test("keeps the selected workspace when available and scopes its sessions", () =
     ], "C:\\Code\\Daemon").map((session) => session.id),
     ["two"],
   );
+});
+
+test("persists the selected workspace in the URL so a PWA reload can restore it", () => {
+  const href = "https://command-center.example/?workspace=" + encodeURIComponent("C:\\Code\\Nimbalyst");
+  assert.equal(workspacePathFromUrl(href), "C:\\Code\\Nimbalyst");
+
+  const selected = withWorkspacePath(href, "C:\\Code\\BWT2023");
+  assert.equal(workspacePathFromUrl(selected), "C:\\Code\\BWT2023");
 });
 
 test("keeps unsaved workflow text when a live session refresh arrives", () => {

@@ -25,7 +25,7 @@ import {
   type GatewayUsage,
   type GatewayWorkspace,
 } from "../lib/gateway";
-import { chooseWorkspacePath, sessionsForWorkspace } from "../lib/workspaceView";
+import { chooseWorkspacePath, sessionsForWorkspace, withWorkspacePath, workspacePathFromUrl } from "../lib/workspaceView";
 import {
   draftForSession,
   patchWorkflowDraft,
@@ -778,6 +778,9 @@ function NewSessionDialog({
 }
 
 export default function NimbalystMobile() {
+  const initialWorkspacePath = typeof window === "undefined"
+    ? seedSessions[0].workspacePath
+    : workspacePathFromUrl(window.location.href) || seedSessions[0].workspacePath;
   const [sessions, setSessions] = useState(seedSessions);
   const [view, setView] = useState<"attention" | "all">("attention");
   const [selectedId, setSelectedId] = useState(seedSessions[0].id);
@@ -790,7 +793,7 @@ export default function NimbalystMobile() {
   const [workspaces, setWorkspaces] = useState<GatewayWorkspace[]>([
     { path: seedSessions[0].workspacePath, name: seedSessions[0].project },
   ]);
-  const [selectedWorkspacePath, setSelectedWorkspacePath] = useState(seedSessions[0].workspacePath);
+  const [selectedWorkspacePath, setSelectedWorkspacePath] = useState(initialWorkspacePath);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [gatewayLoading, setGatewayLoading] = useState(false);
   const [gatewayError, setGatewayError] = useState("");
@@ -1046,6 +1049,9 @@ export default function NimbalystMobile() {
   const selectWorkspace = (workspacePath: string) => {
     selectedWorkspacePathRef.current = workspacePath;
     setSelectedWorkspacePath(workspacePath);
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", withWorkspacePath(window.location.href, workspacePath));
+    }
     setSelectedId((current) => sessions.some(
       (session) => session.id === current && session.workspacePath === workspacePath,
     ) ? current : (sessions.find((session) => session.workspacePath === workspacePath)?.id ?? ""));
