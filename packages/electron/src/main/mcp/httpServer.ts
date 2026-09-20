@@ -197,6 +197,13 @@ const routeRemoteGatewayRequest = createRemoteGatewayRouter({
     const sessions = (await AISessionsRepository.list(workspacePath))
       .filter((session) => session.sessionType !== 'workstream')
       .slice(0, 100);
+    // `SessionMeta` deliberately stays small for list rendering. Hydrate the
+    // selected rows in one batch so adopted/external worktree paths can still
+    // be represented even when they do not have a managed worktree ID.
+    const sessionDataById = new Map(
+      (await AISessionsRepository.getMany(sessions.map((session) => session.id)))
+        .map((session) => [session.id, session]),
+    );
     const db = getDatabase();
     const worktrees = db ? await createWorktreeStore(db).list(workspacePath) : [];
     let mainBranch = '';
@@ -221,7 +228,13 @@ const routeRemoteGatewayRequest = createRemoteGatewayRouter({
       return {
         ...session,
         status,
-        gitLocation: resolveRemoteGitLocation(session.worktreeId, workspacePath, mainBranch, worktrees),
+        gitLocation: resolveRemoteGitLocation(
+          session.worktreeId,
+          workspacePath,
+          mainBranch,
+          worktrees,
+          sessionDataById.get(session.id)?.worktreePath,
+        ),
       };
     }));
   },

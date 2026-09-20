@@ -496,6 +496,14 @@ export function hasActiveStreamingSessions(): boolean {
 }
 
 /**
+ * Check whether one session has a turn in progress (running or streaming).
+ * This deliberately excludes retained idle session-state entries.
+ */
+export function isSessionTurnRunning(sessionId: string): boolean {
+  return getSessionStateManager().getRunningSessionIds().includes(sessionId);
+}
+
+/**
  * Shutdown handler - called when app is closing
  */
 export async function shutdownSessionStateHandlers() {

@@ -50,7 +50,7 @@ import { registerWindowChromeHandlers } from './ipc/WindowChromeHandlers';
 import { registerEditorStateHandlers } from './ipc/EditorStateHandlers';
 import { registerHistoryHandlers } from './ipc/HistoryHandlers';
 import { registerSessionHandlers } from './ipc/SessionHandlers';
-import { registerSessionStateHandlers, shutdownSessionStateHandlers, hasActiveStreamingSessions } from './ipc/SessionStateHandlers';
+import { registerSessionStateHandlers, shutdownSessionStateHandlers, hasActiveStreamingSessions, isSessionTurnRunning } from './ipc/SessionStateHandlers';
 import { registerAttachmentHandlers } from './ipc/AttachmentHandlers';
 import { registerThemeHandlers } from './ipc/ThemeHandlers';
 import { registerWorkspaceWatcherHandlers } from './file/WorkspaceWatcher';
@@ -2900,6 +2900,7 @@ app.whenReady().then(async () => {
         SessionCacheWarmScheduler.getInstance().configure({
             loadSession: (sessionId) => AISessionsRepository.get(sessionId),
             updateMetadata: (sessionId, metadata) => AISessionsRepository.updateMetadata(sessionId, { metadata: { ...metadata } }),
+            isSessionTurnRunning,
             executor: async ({ sessionId, workspacePath }) => {
                 if (!aiService) return { triggered: false };
                 await aiService.queuePromptForSession(

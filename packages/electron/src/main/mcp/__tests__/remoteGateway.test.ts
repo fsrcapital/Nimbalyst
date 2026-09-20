@@ -320,5 +320,17 @@ describe('remote gateway', () => {
       path: 'C:\\Code\\Nimbalyst_worktrees\\luna-review',
       branch: 'worktree/luna-review',
     });
+    expect(resolveRemoteGitLocation(
+      null,
+      'C:\\Code\\Nimbalyst',
+      'feat/main-session',
+      worktrees,
+      'C:\\Code\\Nimbalyst_worktrees\\external-codex-session',
+    )).toEqual({
+      kind: 'worktree',
+      name: 'external-codex-session',
+      path: 'C:\\Code\\Nimbalyst_worktrees\\external-codex-session',
+      branch: '',
+    });
   });
 });

@@ -208,6 +208,32 @@ Investigate first, then advise.
     expect(builtin?.description).toBe('Reduces conversation history by summarizing older messages');
   });
 
+  it('preserves the leading dot in Claude project command namespaces reported by the SDK', async () => {
+    setAgentWorkflowSourceSettings({
+      workspaceClaudeCompatibilityEnabled: false,
+      includeProjectClaudeSources: false,
+      includeUserClaudeSources: false,
+      extensionWorkflowsEnabled: false,
+    });
+
+    const service = new AgentWorkflowService(workspacePath, {
+      userHomePath,
+      extensionDirectoriesLoader: async () => [],
+      nativeClaudePluginPathsLoader: async () => [],
+      releaseChannelLoader: () => 'stable',
+    });
+
+    const entries = await service.listEntries({
+      provider: 'claude-code',
+      nativeCommands: ['claude:bwt-compact'],
+    });
+
+    expect(entries).toContainEqual(expect.objectContaining({
+      name: '.claude:bwt-compact',
+      source: 'builtin',
+    }));
+  });
+
   it('hides skills that opt out with user-invocable: false', async () => {
     const skillsDir = path.join(workspacePath, '.claude', 'skills', 'hidden-skill');
     fs.mkdirSync(skillsDir, { recursive: true });

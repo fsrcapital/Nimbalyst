@@ -140,6 +140,15 @@ function sanitizeFileName(value: string): string {
   return sanitizeCodexName(value).toLowerCase();
 }
 
+/**
+ * Claude's SDK reports project-owned commands as `claude:name`, while the
+ * Claude CLI requires the project namespace to retain its leading dot:
+ * `/.claude:name`.
+ */
+function normalizeClaudeNativeCommandName(name: string): string {
+  return name.startsWith('claude:') ? `.${name}` : name;
+}
+
 function dedupePlugins(plugins: Array<{ type: 'local'; path: string }>): Array<{ type: 'local'; path: string }> {
   const seen = new Set<string>();
   const deduped: Array<{ type: 'local'; path: string }> = [];
@@ -926,10 +935,13 @@ export class AgentWorkflowService {
     const entries: AgentWorkflowEntry[] = [];
 
     for (const name of nativeCommands) {
+      const nativeName = usesCodexStyleAgentWorkflows(provider)
+        ? name
+        : normalizeClaudeNativeCommandName(name);
       entries.push({
-        id: `provider-native:command:${name}`,
-        name,
-        description: commandDescriptions[name] || `Execute ${name} command`,
+        id: `provider-native:command:${nativeName}`,
+        name: nativeName,
+        description: commandDescriptions[name] || `Execute ${nativeName} command`,
         source: 'builtin',
         kind: 'command',
         sourceType: 'provider-native',

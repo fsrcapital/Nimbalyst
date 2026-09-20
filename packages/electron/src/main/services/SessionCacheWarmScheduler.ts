@@ -27,6 +27,8 @@ interface SessionCacheWarmSchedulerDeps {
   loadSession: (sessionId: string) => Promise<CacheWarmSession | null>;
   updateMetadata: (sessionId: string, metadata: CacheWarmView) => Promise<void>;
   executor: (args: { sessionId: string; workspacePath: string }) => Promise<{ triggered: boolean }>;
+  /** True while this session has a running or streaming turn. */
+  isSessionTurnRunning?: (sessionId: string) => boolean;
   broadcastChanged: (sessionId: string, view: CacheWarmView) => void;
   now?: () => number;
 }
@@ -143,14 +145,11 @@ export class SessionCacheWarmScheduler {
     const workspacePath = session.workspacePath ?? session.workspaceId;
     if (!workspacePath) return;
 
-    if (session.metadata?.hasPendingPrompt === true) {
-      const retryAt = now + RETRY_MS;
-      const view: CacheWarmView = {
-        ...policy,
-        cacheWarmNextAt: retryAt,
-      };
-      await this.persist(sessionId, view);
-      if (view.cacheWarmNextAt) this.arm(sessionId, view.cacheWarmNextAt);
+    // Queueing a keepalive while the session is producing a response defers it
+    // behind that turn. The eventual prompt then becomes a visible, irrelevant
+    // conversation entry. Retry after the active turn instead.
+    if (session.metadata?.hasPendingPrompt === true || this.deps.isSessionTurnRunning?.(sessionId)) {
+      await this.defer(sessionId, policy, now);
       return;
     }
 
@@ -184,5 +183,14 @@ export class SessionCacheWarmScheduler {
     if (!this.deps) return;
     await this.deps.updateMetadata(sessionId, view);
     this.deps.broadcastChanged(sessionId, view);
+  }
+
+  private async defer(sessionId: string, policy: CacheWarmView, now: number): Promise<void> {
+    const view: CacheWarmView = {
+      ...policy,
+      cacheWarmNextAt: now + RETRY_MS,
+    };
+    await this.persist(sessionId, view);
+    if (view.cacheWarmNextAt) this.arm(sessionId, view.cacheWarmNextAt);
   }
 }

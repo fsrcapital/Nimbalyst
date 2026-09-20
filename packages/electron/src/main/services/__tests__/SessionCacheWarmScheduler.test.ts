@@ -148,4 +148,31 @@ describe('SessionCacheWarmScheduler', () => {
     expect(executor).not.toHaveBeenCalled();
     expect(metadata.cacheWarmNextAt).toBeGreaterThan(Date.now());
   });
+
+  it('does not queue a keepalive while a session turn is running', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    const metadata: Record<string, unknown> = {};
+    const executor = vi.fn().mockResolvedValue({ triggered: true });
+    let turnRunning = true;
+    const scheduler = SessionCacheWarmScheduler.getInstance();
+    scheduler.configure({
+      loadSession: async () => ({ id: 'session-running', workspacePath: 'C:/workspace', updatedAt: 1_000_000, metadata }),
+      updateMetadata: async (_sessionId, updates) => { Object.assign(metadata, updates); },
+      executor,
+      isSessionTurnRunning: () => turnRunning,
+      broadcastChanged: vi.fn(),
+    });
+
+    await scheduler.setEnabled('session-running', true);
+    await vi.advanceTimersByTimeAsync(CACHE_WARM_INTERVAL_MS);
+
+    expect(executor).not.toHaveBeenCalled();
+    expect(metadata.cacheWarmNextAt).toBe(Date.now() + (5 * 60 * 1000));
+
+    turnRunning = false;
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+    expect(executor).toHaveBeenCalledOnce();
+  });
 });
