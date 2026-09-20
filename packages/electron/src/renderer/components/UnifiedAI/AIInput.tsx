@@ -40,7 +40,7 @@ import { parseMentionTokens } from './commandPills/parseMentionTokens';
 import { HighlightOverlay, type OverlayToken } from './commandPills/HighlightOverlay';
 import { CommandPillPopover } from './commandPills/CommandPillPopover';
 import { canPersistWorkspaceHydratedState } from '../../utils/workspaceHydration';
-import { shouldConsumeTypeaheadEnter } from './aiInputKeyboard';
+import { hasSendableAIInput, shouldConsumeTypeaheadEnter } from './aiInputKeyboard';
 
 export interface AIInputRef {
   focus: () => void;
@@ -208,6 +208,9 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
 
     // Track attachments that are being processed (e.g., compressed)
     const [processingAttachments, setProcessingAttachments] = useState<Array<{ id: string; filename: string }>>([]);
+    // Enter can arrive while an image is still being validated/saved. Keep the
+    // user's send intent and submit once the attachment is available.
+    const pendingSendRef = useRef(false);
 
     // Track if content starting with '#' came from a paste (to prevent memory mode activation)
     const pastedHashContentRef = useRef(false);
@@ -1020,11 +1023,24 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
       // Skip if attachments are still being processed (e.g., image compression)
       if (e.key === 'Enter' && !e.shiftKey && !isTypeaheadVisible && !e.nativeEvent.isComposing) {
         e.preventDefault();
-        if (value.trim() && !disabled && processingAttachments.length === 0) {
+        if (hasSendableAIInput(value, attachments.length) && !disabled) {
+          if (processingAttachments.length > 0) {
+            pendingSendRef.current = true;
+            return;
+          }
           onSend(value);
         }
       }
     };
+
+    useEffect(() => {
+      if (processingAttachments.length > 0 || !pendingSendRef.current) return;
+      // Keep the intent until the attachment callback/value update has landed;
+      // those updates can commit one render after processing reaches zero.
+      if (!hasSendableAIInput(value, attachments.length) || disabled) return;
+      pendingSendRef.current = false;
+      onSend(value);
+    }, [attachments.length, disabled, onSend, processingAttachments.length, value]);
 
     // Handle file attachment
     const handleFileAttachment = useCallback(async (file: File) => {
@@ -1032,6 +1048,10 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
 
       // Generate a temporary ID for tracking processing state
       const processingId = `processing-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+      // Mark the attachment as processing before any async validation so an
+      // immediate Enter after paste is held until the screenshot is ready.
+      setProcessingAttachments(prev => [...prev, { id: processingId, filename: file.name }]);
 
       // Capture undoCount at the START of the IPC. If undo() advances the
       // counter while the attachment:save IPC is in flight, the user undid
@@ -1047,14 +1067,12 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
         });
 
         if (!validation.valid) {
+          pendingSendRef.current = false;
           pasteUndoCountRef.current.delete(processingId);
           console.error('[AIInput] File validation failed:', validation.error);
           alert(validation.error || 'Invalid file');
           return;
         }
-
-        // Add to processing state before starting compression
-        setProcessingAttachments(prev => [...prev, { id: processingId, filename: file.name }]);
 
         const arrayBuffer = await file.arrayBuffer();
         const uint8Array = new Uint8Array(arrayBuffer);
@@ -1087,8 +1105,9 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
           alert(result.error || 'Failed to save attachment');
         }
       } catch (error) {
-        // Remove from processing state on error
-        setProcessingAttachments(prev => prev.filter(p => p.id !== processingId));
+      // Remove from processing state on error
+      pendingSendRef.current = false;
+      setProcessingAttachments(prev => prev.filter(p => p.id !== processingId));
         pasteUndoCountRef.current.delete(processingId);
         console.error('[AIInput] Error handling file attachment:', error);
         alert('Failed to attach file');
@@ -1551,7 +1570,7 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
             <button
               className="ai-chat-send-button w-9 h-9 flex items-center justify-center bg-[var(--nim-primary)] border-none rounded-md text-white cursor-pointer transition-all duration-200 shrink-0 hover:enabled:bg-[var(--nim-primary-hover)] hover:enabled:scale-105 disabled:opacity-40 disabled:cursor-not-allowed"
               onClick={handleSend}
-              disabled={disabled || !value.trim() || processingAttachments.length > 0}
+              disabled={disabled || !hasSendableAIInput(value, attachments.length) || processingAttachments.length > 0}
               title={processingAttachments.length > 0 ? "Processing attachments..." : "Send message (Enter)"}
               aria-label="Send message"
             >

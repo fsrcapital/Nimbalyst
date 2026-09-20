@@ -11,3 +11,8 @@ export function shouldConsumeTypeaheadEnter(
 ): boolean {
   return hasTypeaheadMatch && optionCount > 0 && hasSelectedOption;
 }
+
+/** An attachment-only draft is still a valid prompt to submit. */
+export function hasSendableAIInput(value: string, attachmentCount: number): boolean {
+  return value.trim().length > 0 || attachmentCount > 0;
+}

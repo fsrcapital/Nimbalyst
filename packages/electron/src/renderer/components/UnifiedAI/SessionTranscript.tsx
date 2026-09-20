@@ -23,6 +23,7 @@ import type { ToolCallDiffLoadResult } from '@nimbalyst/runtime/ai/server/transc
 import { AgentTranscriptPanel } from '@nimbalyst/runtime/ui/AgentTranscript/components/AgentTranscriptPanel';
 import type { TranscriptFileLocation } from '@nimbalyst/runtime/ui/AgentTranscript/components/MarkdownRenderer';
 import { ClaudeCliTerminalStrip, requiresExplicitAgentResume } from './ClaudeCliTerminalStrip';
+import { hasSendableAIInput } from './aiInputKeyboard';
 import { ClaudeCliNotInstalledNotice } from './ClaudeCliNotInstalledNotice';
 import type { InteractiveWidgetHost, PermissionScope } from '@nimbalyst/runtime/ui/AgentTranscript/components/CustomToolWidgets/InteractiveWidgetHost';
 import type { TodoItem } from '@nimbalyst/runtime/ui/AgentTranscript/types';
@@ -1101,7 +1102,8 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
   }, [setDraftAttachments]);
 
   const handleQueue = useCallback(async (message: string) => {
-    if (!message.trim() || isQueueing) return;
+    const currentAttachments = store.get(sessionDraftAttachmentsAtom(sessionId)) ?? [];
+    if (!hasSendableAIInput(message, currentAttachments.length) || isQueueing) return;
     setIsQueueing(true);
 
     try {
@@ -1111,8 +1113,6 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
 
       // Read attachments imperatively — we don't subscribe to keep typing
       // from re-rendering the entire transcript.
-      const currentAttachments = store.get(sessionDraftAttachmentsAtom(sessionId)) ?? [];
-
       // If there's already a pending queued prompt, append to it instead of
       // creating a separate entry. This bundles multiple queued messages into
       // one prompt, matching how Claude Code handles stacked queries.
@@ -1166,7 +1166,8 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
     // just-typed prompt if the imperative atom read briefly trails the
     // controlled textarea during a renderer update.
     const currentDraftInput = submittedMessage ?? store.get(sessionDraftInputAtom(sessionId)) ?? '';
-    if (!currentDraftInput.trim() || !sessionData) return;
+    const attachments = store.get(sessionDraftAttachmentsAtom(sessionId)) ?? [];
+    if (!hasSendableAIInput(currentDraftInput, attachments.length) || !sessionData) return;
 
     // Old agent sessions are safe to browse, but the first post-idle message
     // may reconstruct a large provider context. Require an explicit resume
@@ -1198,7 +1199,6 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
         handleQueue(cliMessage);
         return;
       }
-      const attachments = store.get(sessionDraftAttachmentsAtom(sessionId)) ?? [];
       setDraftInput('');
       setDraftAttachments([]);
       clearAIInputHistory(sessionId);
@@ -1236,8 +1236,6 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
     }
 
     let message = currentDraftInput.trim();
-    const attachments = store.get(sessionDraftAttachmentsAtom(sessionId)) ?? [];
-
     // Intercept /plan command - strip it and switch to planning mode
     // Match "/plan" only when followed by whitespace or end of string (not "/planning" or "/planify")
     let overrideMode = aiMode;
