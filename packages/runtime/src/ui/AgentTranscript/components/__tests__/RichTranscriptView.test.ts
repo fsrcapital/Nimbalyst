@@ -487,6 +487,12 @@ describe('transcript auto-scroll thresholds', () => {
     expect(shouldAutoScrollTranscript(true, 0, true)).toBe(false);
   });
 
+  it('suppresses auto-scroll from pointer-down before the browser has expanded the selection', () => {
+    // A browser Selection begins collapsed, so waiting for it to become active
+    // leaves one streaming-update race that can collapse the drag.
+    expect(shouldAutoScrollTranscript(true, 0, false, true)).toBe(false);
+  });
+
   it('resumes auto-scroll once the selection is released', () => {
     expect(shouldAutoScrollTranscript(true, 0, false)).toBe(true);
   });

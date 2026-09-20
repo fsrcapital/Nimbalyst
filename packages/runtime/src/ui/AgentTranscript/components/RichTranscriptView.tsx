@@ -570,12 +570,15 @@ export function isTranscriptAtBottom(distanceFromBottom: number): boolean {
 export function shouldAutoScrollTranscript(
   wasAtBottom: boolean,
   distanceFromBottom: number,
-  hasActiveSelection = false
+  hasActiveSelection = false,
+  hasSelectionGesture = false,
 ): boolean {
-  // Never yank the viewport while the user is dragging a text selection in the
-  // transcript — the jump collapses the highlight they are making, which is the
-  // single most common "I can't copy from the chat" complaint during streaming.
-  if (hasActiveSelection) return false;
+  // Never yank the viewport while the user is starting or extending a text
+  // selection in the transcript. The browser does not expose a non-collapsed
+  // Selection until after the initial pointer movement, so the gesture guard
+  // closes the race where streaming output could scroll first and collapse the
+  // highlight before it exists.
+  if (hasActiveSelection || hasSelectionGesture) return false;
   return wasAtBottom || isTranscriptAtBottom(distanceFromBottom);
 }
 
@@ -1189,6 +1192,7 @@ export const RichTranscriptView = React.forwardRef<
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const viewRootRef = useRef<HTMLDivElement>(null);
   const vlistRef = useRef<VListHandle>(null);
+  const hasSelectionGestureRef = useRef(false);
   const messageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const isAtBottomRef = useRef(
     persistScrollState ? getSessionIsAtBottom(sessionId) : true
@@ -1217,6 +1221,22 @@ export const RichTranscriptView = React.forwardRef<
   useEffect(() => {
     isAtBottomRef.current = persistScrollState ? getSessionIsAtBottom(sessionId) : true;
   }, [persistScrollState, sessionId]);
+
+  // A native text selection begins as a collapsed range. Hold the auto-scroll
+  // guard from pointer-down until the browser has either created the range or
+  // completed the click, including when the pointer is released outside the
+  // transcript pane.
+  useEffect(() => {
+    const clearSelectionGesture = () => {
+      hasSelectionGestureRef.current = false;
+    };
+    document.addEventListener('pointerup', clearSelectionGesture);
+    document.addEventListener('pointercancel', clearSelectionGesture);
+    return () => {
+      document.removeEventListener('pointerup', clearSelectionGesture);
+      document.removeEventListener('pointercancel', clearSelectionGesture);
+    };
+  }, []);
 
   const setAtBottomState = useCallback((isAtBottom: boolean) => {
     isAtBottomRef.current = isAtBottom;
@@ -1538,7 +1558,12 @@ export const RichTranscriptView = React.forwardRef<
       const distanceFromBottom = scrollSize - scrollOffset - viewportSize;
 
       const hasActiveSelection = hasActiveTranscriptSelection(viewRootRef.current);
-      if (shouldAutoScrollTranscript(wasAtBottom, distanceFromBottom, hasActiveSelection)) {
+      if (shouldAutoScrollTranscript(
+        wasAtBottom,
+        distanceFromBottom,
+        hasActiveSelection,
+        hasSelectionGestureRef.current,
+      )) {
         // Account for the "Thinking..." indicator which is an extra item after messages
         const lastIndex = isWaitingForResponse ? messages.length : messages.length - 1;
         vlistRef.current.scrollToIndex(lastIndex, { align: 'end' });
@@ -2428,7 +2453,15 @@ export const RichTranscriptView = React.forwardRef<
   });
 
   return (
-    <div ref={viewRootRef} className="rich-transcript-view h-full flex flex-col bg-[var(--nim-bg)] relative overflow-x-hidden select-text">
+    <div
+      ref={viewRootRef}
+      className="rich-transcript-view h-full flex flex-col bg-[var(--nim-bg)] relative overflow-x-hidden select-text"
+      onPointerDownCapture={(event) => {
+        if (event.button === 0) {
+          hasSelectionGestureRef.current = true;
+        }
+      }}
+    >
       {/* Search Bar */}
       <TranscriptSearchBar
         isVisible={showSearchBar}
