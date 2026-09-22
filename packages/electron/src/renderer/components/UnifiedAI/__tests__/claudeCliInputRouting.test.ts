@@ -1,7 +1,8 @@
 // @vitest-environment node
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   CLAUDE_CLI_PROVIDER_ID,
+  interruptClaudeCliWithDraft,
   isClaudeCliTerminalSession,
 } from '../claudeCliInputRouting';
 
@@ -27,6 +28,60 @@ describe('claudeCliInputRouting', () => {
     });
   });
 
-  // Interrupt/stop is covered by main/services/ai/__tests__/claudeCliInterrupt.test.ts
-  // (NIM-814) — the renderer no longer writes the Ctrl-C byte itself.
+  describe('interruptClaudeCliWithDraft', () => {
+    it('queues a typed follow-up before interrupting the active CLI turn', async () => {
+      const events: string[] = [];
+      const queueDraft = vi.fn(async (draft: string) => {
+        events.push(`queue:${draft}`);
+      });
+      const interrupt = vi.fn(async () => {
+        events.push('interrupt');
+      });
+
+      await interruptClaudeCliWithDraft({
+        draft: 'Continue from the partial result',
+        hasAttachments: false,
+        queueDraft,
+        interrupt,
+      });
+
+      expect(queueDraft).toHaveBeenCalledWith('Continue from the partial result');
+      expect(interrupt).toHaveBeenCalledOnce();
+      expect(events).toEqual([
+        'queue:Continue from the partial result',
+        'interrupt',
+      ]);
+    });
+
+    it('interrupts without creating a queue entry when the draft is empty', async () => {
+      const queueDraft = vi.fn();
+      const interrupt = vi.fn();
+
+      await interruptClaudeCliWithDraft({
+        draft: '   ',
+        hasAttachments: false,
+        queueDraft,
+        interrupt,
+      });
+
+      expect(queueDraft).not.toHaveBeenCalled();
+      expect(interrupt).toHaveBeenCalledOnce();
+    });
+
+    it('still interrupts when preserving the draft fails', async () => {
+      const queueDraft = vi.fn(async () => {
+        throw new Error('Queue is unavailable');
+      });
+      const interrupt = vi.fn();
+
+      await expect(interruptClaudeCliWithDraft({
+        draft: 'Stop now',
+        hasAttachments: false,
+        queueDraft,
+        interrupt,
+      })).rejects.toThrow('Queue is unavailable');
+
+      expect(interrupt).toHaveBeenCalledOnce();
+    });
+  });
 });

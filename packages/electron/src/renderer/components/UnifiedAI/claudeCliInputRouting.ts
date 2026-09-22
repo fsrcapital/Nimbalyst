@@ -19,6 +19,30 @@ export function isClaudeCliTerminalSession(provider: string | null | undefined):
   return provider === CLAUDE_CLI_PROVIDER_ID;
 }
 
-// Cancel/stop no longer writes a raw Ctrl-C from the renderer: the
-// `claude-cli:interrupt` IPC escalates Ctrl-C → Ctrl-C → SIGINT in the main
-// process (NIM-814, see main/services/ai/claudeCliInterrupt.ts).
+/**
+ * Preserve a typed follow-up before stopping a live Claude CLI turn.
+ *
+ * The queue is drained by the main-process idle transition, so the prompt is
+ * only written to the PTY after the interrupt has returned Claude to its
+ * input-ready state. This keeps the terminal's Enter key on the same submit
+ * path as every other queued prompt.
+ */
+export async function interruptClaudeCliWithDraft({
+  draft,
+  hasAttachments,
+  queueDraft,
+  interrupt,
+}: {
+  draft: string;
+  hasAttachments: boolean;
+  queueDraft: (draft: string) => Promise<void> | void;
+  interrupt: () => Promise<void> | void;
+}): Promise<void> {
+  try {
+    if (draft.trim() || hasAttachments) {
+      await queueDraft(draft);
+    }
+  } finally {
+    await interrupt();
+  }
+}

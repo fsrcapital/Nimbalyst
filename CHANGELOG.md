@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 <!-- Bug fixes go here -->
+- Stopping a Claude CLI turn now submits any drafted follow-up automatically.
 - Claude screenshot prompts now submit when Enter is pressed during attachment processing.
 - Remote sessions now preserve external worktree context when showing their Git location.
 - Claude project commands retain their namespace, and cache warming waits for active turns to finish.

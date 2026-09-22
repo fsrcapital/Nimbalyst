@@ -50,7 +50,7 @@ import { supportsWorkspaceSlashCommands } from '../Typeahead/slashCommandAutocom
 import type { TextSelection } from './TextSelectionIndicator';
 import { type SerializableDocumentContext } from '../../hooks/useDocumentContext';
 import { serializeEditorContextItemsForIpc } from './editorContextSerialization';
-import { isClaudeCliTerminalSession } from './claudeCliInputRouting';
+import { interruptClaudeCliWithDraft, isClaudeCliTerminalSession } from './claudeCliInputRouting';
 import { expandSessionMentions } from './sessionMentions';
 import { diffTreeGroupByDirectoryAtom, setDiffTreeGroupByDirectoryAtom } from '../../store/atoms/projectState';
 import { openSettingsCommandAtom } from '../../store/atoms/settingsNavigation';
@@ -1417,14 +1417,18 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
     [workspacePath, sessionId]
   );
 
-  const handleCancel = useCallback(async () => {
+  const handleCancel = useCallback(async (draftFromInput?: string) => {
     try {
       if (isClaudeCliTerminalSession(provider)) {
-        // Escalating stop (NIM-814): Ctrl-C → Ctrl-C → SIGINT in the main
-        // process. Fire-and-forget — escalation can take a few seconds and the
-        // button must stay responsive to repeat presses.
-        void window.electronAPI.terminal.interruptClaudeCli(sessionId).catch((err) => {
-          console.error('[SessionTranscript] Failed to interrupt Claude CLI:', err);
+        const draft = draftFromInput ?? store.get(sessionDraftInputAtom(sessionId)) ?? '';
+        const attachments = store.get(sessionDraftAttachmentsAtom(sessionId)) ?? [];
+        await interruptClaudeCliWithDraft({
+          draft,
+          hasAttachments: attachments.length > 0,
+          queueDraft: handleQueue,
+          interrupt: async () => {
+            await window.electronAPI.terminal.interruptClaudeCli(sessionId);
+          },
         });
         recordClaudeActivity();
         return;
@@ -1436,7 +1440,7 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
     } catch (error) {
       console.error('[SessionTranscript] Failed to cancel request:', error);
     }
-  }, [provider, sessionId, setIsProcessing, recordClaudeActivity]);
+  }, [provider, sessionId, setIsProcessing, recordClaudeActivity, handleQueue]);
 
   const handleFileClick = useCallback((filePath: string, location?: TranscriptFileLocation) => {
     const baseDir = sessionWorktreePath ?? workspacePath;
