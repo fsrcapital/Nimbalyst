@@ -18,4 +18,6 @@ unrelated suites: `claudeCodeEnvironment` (runtime and provider variants),
 The fallback is intentionally limited to `process.platform === 'win32'` with
 no CI flag. It does not bypass the manifest check, dependency override check,
 prerequisite builds, full workspace typecheck, or this repository's focused
-test requirements.
+test requirements. Focused filesystem tests that must create symlinks are
+skipped locally on Windows, where that operation requires an elevated shell or
+Developer Mode; they remain mandatory in CI and on non-Windows pushes.

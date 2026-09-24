@@ -187,7 +187,9 @@ test('staging a clean fixture succeeds and hashes file contents', () => {
   }
 });
 
-test('staging refuses a symlink rather than following it out of the allowlist', () => {
+test('staging refuses a symlink rather than following it out of the allowlist', {
+  skip: process.platform === 'win32' ? 'creating symlinks requires an elevated or Developer Mode shell' : false,
+}, () => {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'nimbalyst-stage-'));
   try {
     const repo = path.join(tmp, 'repo');
@@ -208,7 +210,9 @@ test('staging refuses a symlink rather than following it out of the allowlist', 
   }
 });
 
-test('staging refuses a symlinked ancestor directory, not just a symlinked file', () => {
+test('staging refuses a symlinked ancestor directory, not just a symlinked file', {
+  skip: process.platform === 'win32' ? 'creating symlinks requires an elevated or Developer Mode shell' : false,
+}, () => {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'nimbalyst-stage-'));
   try {
     const repo = path.join(tmp, 'repo');
