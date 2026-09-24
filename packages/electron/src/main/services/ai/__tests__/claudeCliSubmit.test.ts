@@ -4,6 +4,8 @@ import {
   submitWriteGapMs,
   SUBMIT_WRITE_GAP_MS,
   SUBMIT_WRITE_GAP_MAX_MS,
+  TUI_KEYSTROKE_GAP_MS,
+  TUI_SUBMIT_SETTLE_MS,
 } from '../claudeCliSubmit';
 import type { ChatAttachment } from '@nimbalyst/runtime/ai/server/types';
 
@@ -114,7 +116,11 @@ describe('submitClaudeCliPrompt', () => {
       await submitClaudeCliPrompt({ sessionId: 's1', workspacePath: '/w', prompt: '/clear' }, h.deps);
       expect(h.writes).toEqual([
         ['s1', '/'],
-        ['s1', 'clear'],
+        ['s1', 'c'],
+        ['s1', 'l'],
+        ['s1', 'e'],
+        ['s1', 'a'],
+        ['s1', 'r'],
         ['s1', ' '], // NIM-851: dismiss the autocomplete menu so Enter runs the literal command
         ['s1', '\r'],
       ]);
@@ -136,19 +142,29 @@ describe('submitClaudeCliPrompt', () => {
       await submitClaudeCliPrompt({ sessionId: 's1', workspacePath: '/w', prompt: '/implement' }, h.deps);
       expect(h.writes).toEqual([
         ['s1', '/'],
-        ['s1', 'implement'],
+        ...'implement'.split('').map(character => ['s1', character]),
         ['s1', ' '],
         ['s1', '\r'],
       ]);
     });
 
-    it('does NOT add a menu-dismiss space when the slash command already has args (menu closed by its own space) (NIM-851)', async () => {
+    it('adds a standalone menu-dismiss keystroke before Enter when a slash command has args', async () => {
       const h = harness();
-      await submitClaudeCliPrompt({ sessionId: 's1', workspacePath: '/w', prompt: '/track bug foo' }, h.deps);
+      await submitClaudeCliPrompt({
+        sessionId: 's1',
+        workspacePath: '/w',
+        prompt: '/.claude:bwt-ticket-triage ticket 100',
+      }, h.deps);
       expect(h.writes).toEqual([
         ['s1', '/'],
-        ['s1', 'track bug foo'],
+        ...'.claude:bwt-ticket-triage ticket 100'.split('').map(character => ['s1', character]),
+        ['s1', ' '],
         ['s1', '\r'],
+      ]);
+      expect(h.delays).toEqual([
+        SUBMIT_WRITE_GAP_MS,
+        ...Array('.claude:bwt-ticket-triage ticket 100'.length).fill(TUI_KEYSTROKE_GAP_MS),
+        TUI_SUBMIT_SETTLE_MS,
       ]);
     });
 

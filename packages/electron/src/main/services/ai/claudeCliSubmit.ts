@@ -28,6 +28,10 @@ const SUBMIT_TERMINATOR = '\r';
 export const SUBMIT_WRITE_GAP_MS = 25;
 /** Upper bound on the scaled gap, so a huge paste can't stall submission. */
 export const SUBMIT_WRITE_GAP_MAX_MS = 1000;
+/** Slash commands must arrive as keystrokes or Claude's TUI treats Enter as pasted text. */
+export const TUI_KEYSTROKE_GAP_MS = 5;
+/** Let Claude's autocomplete/paste state settle before sending the real Enter key. */
+export const TUI_SUBMIT_SETTLE_MS = 100;
 
 /**
  * Bracketed-paste markers. A single large `pty.write` is fragmented by the OS
@@ -113,8 +117,20 @@ export async function submitClaudeCliPrompt(
     deps.writeToTerminal(input.sessionId, prompt[0]);
     await deps.delay(SUBMIT_WRITE_GAP_MS);
     if (prompt.length > 1) {
-      deps.writeToTerminal(input.sessionId, prompt.slice(1));
-      await deps.delay(SUBMIT_WRITE_GAP_MS);
+      if (prompt.startsWith('/')) {
+        // Claude Code distinguishes typed input from pasted input by arrival
+        // cadence. Sending the remainder in one PTY write makes the following
+        // CR part of that paste on Windows/ConPTY, so it inserts a newline
+        // instead of submitting. Mirror xterm's physical-key path one character
+        // at a time for slash commands.
+        for (const character of prompt.slice(1)) {
+          deps.writeToTerminal(input.sessionId, character);
+          await deps.delay(TUI_KEYSTROKE_GAP_MS);
+        }
+      } else {
+        deps.writeToTerminal(input.sessionId, prompt.slice(1));
+        await deps.delay(SUBMIT_WRITE_GAP_MS);
+      }
     }
     // NIM-851: writing `/` first opens the claude TUI's slash-command
     // autocomplete menu, and that menu (a) fuzzy-matches command DESCRIPTIONS
@@ -126,13 +142,16 @@ export async function submitClaudeCliPrompt(
     // incident: typed `/implement`, ran `/investigate` with empty args). Type a
     // trailing space first: it ends the command token and dismisses the menu
     // (verified on claude 2.1.177), so Enter submits the literal command.
-    // Commands WITH args already closed the menu via their separating space;
-    // bare `/` and `#` memory mode are different UIs and left untouched.
-    const isBareSlashCommand =
-      prompt.startsWith('/') && prompt.length > 1 && !/\s/.test(prompt);
-    if (isBareSlashCommand) {
+    // Do this for commands WITH args too. Their separating space closes the
+    // autocomplete menu, but the rest of the line arrives as one PTY write;
+    // without a final standalone keystroke, Claude can treat the following CR
+    // as a pasted newline and leave the command waiting in the raw terminal.
+    // A trailing space is semantically inert and gives the TUI a clean input
+    // boundary before Enter. Bare `/` and `#` memory mode remain untouched.
+    const isSlashCommand = prompt.startsWith('/') && prompt.length > 1;
+    if (isSlashCommand) {
       deps.writeToTerminal(input.sessionId, ' ');
-      await deps.delay(SUBMIT_WRITE_GAP_MS);
+      await deps.delay(TUI_SUBMIT_SETTLE_MS);
     }
     deps.writeToTerminal(input.sessionId, SUBMIT_TERMINATOR);
   } else {

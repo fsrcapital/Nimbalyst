@@ -96,7 +96,14 @@ for (const from of fromPaths) {
   const parent = path.dirname(paired.expected);
   fs.mkdirSync(parent, { recursive: true });
   const target = path.relative(parent, paired.alternate);
-  fs.symlinkSync(target, paired.expected);
+  // Windows directory symlinks require Administrator privileges or Developer
+  // Mode. A junction resolves the same package directory for electron-builder
+  // without imposing either requirement on local release builds.
+  fs.symlinkSync(
+    process.platform === 'win32' ? paired.alternate : target,
+    paired.expected,
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
   linked++;
   console.log(`[normalize-extra-resources] Linked ${from} -> ${target}`);
 }

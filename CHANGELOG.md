@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 <!-- Bug fixes go here -->
+- Claude project skills selected from the slash menu now keep their `.claude` namespace and submit without leaving Enter as a newline in the terminal.
+- Windows release builds no longer require Administrator privileges or Developer Mode to normalize native package resources.
 - Stopping a Claude CLI turn now submits any drafted follow-up automatically.
 - Claude screenshot prompts now submit when Enter is pressed during attachment processing.
 - Remote sessions now preserve external worktree context when showing their Git location.

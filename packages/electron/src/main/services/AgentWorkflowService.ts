@@ -237,11 +237,11 @@ function sanitizeFileName(value: string): string {
 }
 
 /**
- * Claude's SDK reports project-owned commands as `claude:name`, while the
- * Claude CLI requires the project namespace to retain its leading dot:
+ * Claude's SDK reports project-owned commands and skills as `claude:name`,
+ * while the Claude CLI requires the project namespace to retain its leading dot:
  * `/.claude:name`.
  */
-function normalizeClaudeNativeCommandName(name: string): string {
+function normalizeClaudeNativeWorkflowName(name: string): string {
   return name.startsWith('claude:') ? `.${name}` : name;
 }
 
@@ -601,7 +601,9 @@ export class AgentWorkflowService {
     const providerEntries = [
       ...this.buildDescriptorEntries(snapshot.descriptors, provider),
       ...this.buildProviderNativeEntries(provider, options.nativeCommands ?? [], options.nativeSkills ?? []),
-    ];
+    ].map(entry => usesCodexStyleAgentWorkflows(provider)
+      ? entry
+      : { ...entry, name: normalizeClaudeNativeWorkflowName(entry.name) });
 
     const seenNames = new Set<string>();
     return providerEntries.filter(entry => {
@@ -1093,7 +1095,7 @@ export class AgentWorkflowService {
       const native = normalizeNativeWorkflow(command);
       const nativeName = usesCodexStyleAgentWorkflows(provider)
         ? native.name
-        : normalizeClaudeNativeCommandName(native.name);
+        : normalizeClaudeNativeWorkflowName(native.name);
       entries.push({
         id: `provider-native:command:${nativeName}`,
         name: nativeName,
@@ -1114,10 +1116,13 @@ export class AgentWorkflowService {
 
     for (const skill of nativeSkills) {
       const native = normalizeNativeWorkflow(skill);
+      const nativeName = usesCodexStyleAgentWorkflows(provider)
+        ? native.name
+        : normalizeClaudeNativeWorkflowName(native.name);
       entries.push({
-        id: `provider-native:skill:${native.name}`,
-        name: native.name,
-        description: native.description || `Invoke the ${native.name} ${nativeSkillProviderLabel} skill`,
+        id: `provider-native:skill:${nativeName}`,
+        name: nativeName,
+        description: native.description || `Invoke the ${nativeName} ${nativeSkillProviderLabel} skill`,
         source: native.source ?? 'plugin',
         kind: 'skill',
         sourceType: 'provider-native',

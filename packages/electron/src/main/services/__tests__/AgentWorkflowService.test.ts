@@ -309,7 +309,7 @@ Investigate first, then advise.
     expect(builtin?.description).toBe('Reduces conversation history by summarizing older messages');
   });
 
-  it('preserves the leading dot in Claude project command namespaces reported by the SDK', async () => {
+  it('preserves the leading dot in Claude project command and skill namespaces reported by the SDK', async () => {
     setAgentWorkflowSourceSettings({
       workspaceClaudeCompatibilityEnabled: false,
       includeProjectClaudeSources: false,
@@ -327,12 +327,63 @@ Investigate first, then advise.
     const entries = await service.listEntries({
       provider: 'claude-code',
       nativeCommands: ['claude:bwt-compact'],
+      nativeSkills: ['claude:bwt-ticket-triage'],
     });
 
     expect(entries).toContainEqual(expect.objectContaining({
       name: '.claude:bwt-compact',
       source: 'builtin',
     }));
+    expect(entries).toContainEqual(expect.objectContaining({
+      name: '.claude:bwt-ticket-triage',
+      source: 'plugin',
+      kind: 'skill',
+    }));
+  });
+
+  it('restores the leading dot when a discovered plugin descriptor uses the claude namespace', async () => {
+    setAgentWorkflowSourceSettings({
+      workspaceClaudeCompatibilityEnabled: false,
+      includeProjectClaudeSources: false,
+      includeUserClaudeSources: false,
+      extensionWorkflowsEnabled: false,
+    });
+
+    const pluginRoot = path.join(workspacePath, 'claude');
+    const skillDir = path.join(pluginRoot, 'skills', 'bwt-ticket-triage');
+    fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginRoot, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'claude' }),
+    );
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      `---
+name: bwt-ticket-triage
+description: Triage a BWT ticket
+---
+
+Triage the ticket.
+`,
+      'utf-8',
+    );
+
+    const service = new AgentWorkflowService(workspacePath, {
+      userHomePath,
+      extensionDirectoriesLoader: async () => [],
+      nativeClaudePluginPathsLoader: async () => [{ type: 'local', path: pluginRoot }],
+      releaseChannelLoader: () => 'stable',
+    });
+
+    const entries = await service.listEntries({ provider: 'claude-code-cli' });
+
+    expect(entries).toContainEqual(expect.objectContaining({
+      name: '.claude:bwt-ticket-triage',
+      source: 'plugin',
+      kind: 'skill',
+    }));
+    expect(entries.some(entry => entry.name === 'claude:bwt-ticket-triage')).toBe(false);
   });
 
   it('hides skills that opt out with user-invocable: false', async () => {
