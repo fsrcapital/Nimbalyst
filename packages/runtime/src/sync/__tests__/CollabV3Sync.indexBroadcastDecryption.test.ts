@@ -39,6 +39,27 @@ function jwtFor(subject: string): string {
   return `header.${payload}.signature`;
 }
 
+async function establishIndexCoverage(
+  provider: ReturnType<typeof createCollabV3Sync>,
+  socket: FakeWebSocket,
+): Promise<void> {
+  const fetching = provider.fetchIndex!();
+  await vi.waitFor(() => expect(socket.send.mock.calls.some(([payload]) => JSON.parse(payload as string).type === 'indexPageRequest')).toBe(true));
+  const request = socket.send.mock.calls
+    .map(([payload]) => JSON.parse(payload as string))
+    .find((message) => message.type === 'indexPageRequest');
+  socket.receive({
+    type: 'indexPageResponse',
+    protocolVersion: 2,
+    requestId: request.requestId,
+    mode: 'bootstrap',
+    entries: [],
+    complete: true,
+    cursor: 0,
+  });
+  await fetching;
+}
+
 describe('CollabV3 index broadcast decryption', () => {
   beforeEach(() => {
     FakeWebSocket.instances = [];
@@ -66,20 +87,26 @@ describe('CollabV3 index broadcast decryption', () => {
     await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
     const oldSocket = FakeWebSocket.instances[0];
     oldSocket.open();
-    oldProvider.syncSessionsToIndex?.([{
+    await establishIndexCoverage(oldProvider, oldSocket);
+    const now = Date.now();
+    await oldProvider.syncSessionsToIndex?.([{
       id: 'old-session',
       title: 'Old pairing',
       provider: 'openai-codex',
       mode: 'agent',
       workspaceId: '/workspace',
       messageCount: 0,
-      updatedAt: 1_000,
-      createdAt: 1_000,
+      updatedAt: now,
+      createdAt: now,
     }]);
-    await vi.waitFor(() => expect(oldSocket.send).toHaveBeenCalled());
-    const encryptedSession = oldSocket.send.mock.calls
+    await vi.waitFor(() => expect(oldSocket.send.mock.calls.some(([payload]) => {
+      const message = JSON.parse(payload as string);
+      return message.type === 'indexUpdate' || message.type === 'indexBatchUpdate';
+    })).toBe(true));
+    const publication = oldSocket.send.mock.calls
       .map(([payload]) => JSON.parse(payload as string))
-      .find((message) => message.type === 'indexUpdate')?.session;
+      .find((message) => message.type === 'indexUpdate' || message.type === 'indexBatchUpdate');
+    const encryptedSession = publication?.session ?? publication?.sessions?.[0];
     expect(encryptedSession).toBeDefined();
     oldProvider.disconnectAll();
 

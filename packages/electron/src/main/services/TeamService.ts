@@ -24,6 +24,7 @@ import { createHash } from 'crypto';
 import { existsSync } from 'fs';
 import { basename } from 'path';
 import { mkdir, stat } from 'fs/promises';
+import { registerOrganizationDirectoryHandler } from '../ipc/OrganizationDirectoryHandler';
 import { safeHandle } from '../utils/ipcRegistry';
 import { logger } from '../utils/logger';
 import { getGitRemoteIdentities, getRawGitRemote, normalizeGitRemote } from '../utils/gitUtils';
@@ -261,6 +262,24 @@ export interface TeamMember {
 }
 
 type InviteMemberRole = 'owner' | 'admin' | 'member' | 'viewer' | 'guest';
+
+/**
+ * An extra project an invitation should grant.
+ *
+ * `teamProjectId` is the routing key, not `projectId`: the server's
+ * `project_access.project_id` column holds `team_project_id`, so a grant sent
+ * under the other identifier writes a row that authorizes nothing.
+ */
+export interface InviteProjectGrant {
+  teamProjectId: string;
+  projectRole: 'project-admin' | 'project-editor' | 'project-viewer';
+}
+
+export interface InviteMemberOutcome {
+  projectGrantsApplied: number;
+  /** `teamProjectId`s the server accepted the invitation for but could not grant. */
+  projectGrantsFailed: string[];
+}
 
 // ============================================================================
 // Per-Org JWT Cache
@@ -650,7 +669,10 @@ async function fetchTeamApi(
       ? getPersonalSessionJwtForAccount(accountOrgId)
       : getPersonalSessionJwt();
   if (!jwt) {
-    logger.main.warn(`[TeamService] No JWT available (source: ${jwtSource})`);
+    // Debug logging - uncomment if needed. Being signed out is an expected
+    // steady state, and every caller already logs its own failure, so this
+    // fired on every poll for no added signal.
+    // logger.main.warn(`[TeamService] No JWT available (source: ${jwtSource})`);
     throw new Error('Not authenticated. Sign in first.');
   }
 
@@ -1120,6 +1142,26 @@ export async function setAgentPosting(
 let listTeamsCache: { promise: Promise<TeamDirectory>; expiresAt: number } | null = null;
 const LIST_TEAMS_TTL_MS = 5 * 60_000;
 
+// The request currently on the wire, held separately from the cache so that
+// invalidating the cache cannot abandon it.
+//
+// NIM-3711: `fetchTeamApi` refreshes an expiring personal JWT, that refresh
+// emits an authenticated auth-state change, and the change handler calls
+// `invalidateListTeamsCache()` -- all while the request that triggered the
+// refresh is still in flight. The next caller therefore missed the cache and
+// started a *second* identical request, which could refresh again. At startup,
+// where three workspaces each run autoMatch and tracker-sync init, that put
+// four concurrent `GET /api/teams` calls on an endpoint whose cold latency is
+// already seconds; two of them blew the 15s deadline.
+//
+// Invalidation now means "do not cache the answer", not "start another one".
+let listTeamsInFlight: Promise<TeamDirectory> | null = null;
+// Set when an invalidation landed while `listTeamsInFlight` was outstanding.
+// Callers already waiting still get that answer -- it is the same answer they
+// would have got a moment earlier -- but it is not cached, so the next caller
+// re-reads.
+let listTeamsInFlightInvalidated = false;
+
 /**
  * The team list plus whether it can be trusted as the whole truth.
  *
@@ -1137,27 +1179,51 @@ export interface TeamDirectory {
 
 export function invalidateListTeamsCache(): void {
   listTeamsCache = null;
+  if (listTeamsInFlight) listTeamsInFlightInvalidated = true;
   teamAccountBindingHints.clear();
 }
 
-export async function listTeams(): Promise<TeamDetails[]> {
-  return (await listTeamDirectory()).teams;
+export interface ListTeamsOptions {
+  /**
+   * Open a new request even if one is already on the wire.
+   *
+   * For callers that just changed team membership themselves, or are acting on
+   * a change made elsewhere (the manual Refresh affordance, an invite accepted
+   * in the browser): an outstanding request was issued before that change and
+   * cannot answer for it. Ordinary discovery callers must leave this unset so
+   * they coalesce -- see `listTeamsInFlight`.
+   */
+  forceFresh?: boolean;
 }
 
-export async function listTeamDirectory(): Promise<TeamDirectory> {
+export async function listTeams(options?: ListTeamsOptions): Promise<TeamDetails[]> {
+  const directory = await listTeamDirectory(options);
+  // Array-only consumers cannot represent an unknown membership set.
+  if (!directory.complete) throw new Error('Organization directory is unavailable. Try again later.');
+  return directory.teams;
+}
+
+export async function listTeamDirectory(options?: ListTeamsOptions): Promise<TeamDirectory> {
   if (!isAuthenticated()) {
     logger.main.info('[TeamService] listTeams: not authenticated, skipping');
     return { teams: [], complete: false };
   }
 
   const now = Date.now();
-  if (listTeamsCache && listTeamsCache.expiresAt > now) {
-    return listTeamsCache.promise;
+  if (!options?.forceFresh) {
+    if (listTeamsCache && listTeamsCache.expiresAt > now) {
+      return listTeamsCache.promise;
+    }
+    // A request is already on the wire for exactly this question. Join it
+    // rather than opening a second one; see `listTeamsInFlight`.
+    if (listTeamsInFlight) {
+      return listTeamsInFlight;
+    }
   }
 
   const promise = (async (): Promise<TeamDirectory> => {
-    let allAccountLookupsSucceeded = true;
     const allAccounts = getAccounts();
+    let allAccountLookupsSucceeded = allAccounts.length > 0;
     const teamsByOrgId = new Map<string, TeamDetails>();
     const allTeams: TeamDetails[] = [];
 
@@ -1165,7 +1231,8 @@ export async function listTeamDirectory(): Promise<TeamDirectory> {
     const results = await Promise.allSettled(
       allAccounts.map(async (account) => {
         const data = await fetchTeamApi('/api/teams', 'GET', undefined, undefined, account.personalOrgId) as { teams: RawTeamDetails[] };
-        return (data.teams || []).map((rawTeam) => ({
+        if (!data || !Array.isArray(data.teams)) throw new Error('Invalid organization directory response');
+        return data.teams.map((rawTeam) => ({
           ...brandTeamDetails(rawTeam),
           sourcePersonalOrgId: account.personalOrgId,
           sourceEmail: account.email,
@@ -1214,10 +1281,16 @@ export async function listTeamDirectory(): Promise<TeamDirectory> {
         }
       } else {
         allAccountLookupsSucceeded = false;
-        logger.main.error(
-          `[TeamService] listTeams error for account ${allAccounts[index]?.email ?? 'unknown'}:`,
-          result.reason,
-        );
+        const email = allAccounts[index]?.email ?? 'unknown';
+        // A signed-out account rejects with "Not authenticated" on every poll.
+        // That is an expected steady state, not a fault, so log it as a single
+        // warn line -- passing the Error made us write a full stack trace each
+        // time, which was the bulk of this tag's ~13% share of main.log.
+        if (result.reason instanceof Error && result.reason.message.startsWith('Not authenticated')) {
+          logger.main.warn(`[TeamService] listTeams skipped for account ${email}: not signed in`);
+        } else {
+          logger.main.error(`[TeamService] listTeams error for account ${email}:`, result.reason);
+        }
       }
     }
 
@@ -1246,12 +1319,17 @@ export async function listTeamDirectory(): Promise<TeamDirectory> {
   })();
 
   listTeamsCache = { promise, expiresAt: now + LIST_TEAMS_TTL_MS };
+  listTeamsInFlight = promise;
+  listTeamsInFlightInvalidated = false;
   // A partial/failed account lookup is not authoritative. Return any teams we
   // did resolve to this caller, but evict the result immediately so a timeout
   // cannot pin "no teams" (or an incomplete list) for the full five minutes.
   void promise.then(
     (directory) => {
-      if (!directory.complete && listTeamsCache?.promise === promise) {
+      const invalidatedWhileInFlight = listTeamsInFlightInvalidated;
+      if (listTeamsInFlight === promise) listTeamsInFlight = null;
+      if ((!directory.complete || invalidatedWhileInFlight)
+          && listTeamsCache?.promise === promise) {
         listTeamsCache = null;
       }
       // Drive the Organization Messages menu item's visibility. A partial lookup
@@ -1263,6 +1341,7 @@ export async function listTeamDirectory(): Promise<TeamDirectory> {
       }
     },
     () => {
+      if (listTeamsInFlight === promise) listTeamsInFlight = null;
       if (listTeamsCache?.promise === promise) listTeamsCache = null;
     },
   );
@@ -1273,16 +1352,14 @@ export async function listTeamDirectory(): Promise<TeamDirectory> {
 /**
  * Get a specific team's details by orgId.
  */
-async function getTeamByOrgId(orgId: string): Promise<TeamDetails | null> {
+export async function getTeamByOrgId(orgId: string): Promise<TeamDetails | null> {
   if (!isAuthenticated()) return null;
 
-  try {
-    const teams = await listTeams();
-    return teams.find(t => t.orgId === orgId) || null;
-  } catch (err) {
-    logger.main.error('[TeamService] getTeamByOrgId error:', err);
-    return null;
-  }
+  // Null means "the directory is complete and this org is not in it". An
+  // unavailable directory is not that answer, so it propagates to the IPC
+  // caller as an error instead of being flattened into "not a member".
+  const teams = await listTeams();
+  return teams.find(t => t.orgId === orgId) || null;
 }
 
 /**
@@ -1976,7 +2053,7 @@ export async function resolveInviteDeepLink(
     // the invitation in the browser, so a stale directory would report a team
     // the user "isn't in" moments after they joined it.
     invalidateListTeamsCache();
-    const team = (await listTeams()).find((candidate) => candidate.orgId === orgId);
+    const team = (await listTeams({ forceFresh: true })).find((candidate) => candidate.orgId === orgId);
     if (!team) return { status: 'not-found', orgId, email: normalizedEmail };
 
     if (team.membershipType && team.membershipType !== 'active_member') {
@@ -2032,9 +2109,30 @@ export async function listMembersWithTeamJwt(
 
 /**
  * Invite a member to a team by email. Requires explicit orgId.
+ *
+ * `projectGrants` covers only the projects *beyond* the org's primary one — the
+ * server already seeds every joiner an editor grant there — and is keyed by
+ * `teamProjectId`, which is what the server's `project_access` rows hold.
+ *
+ * The result carries what actually happened, because a grant can fail after the
+ * membership is real. Reporting a partial success as a plain success would tell
+ * the inviter they shared a project the invitee cannot open.
  */
-async function inviteMember(orgId: string, email: string, role?: InviteMemberRole): Promise<void> {
-  await fetchTeamApi(`/api/teams/${orgId}/invite`, 'POST', { email, ...(role ? { role } : {}) }, orgId);
+async function inviteMember(
+  orgId: string,
+  email: string,
+  role?: InviteMemberRole,
+  projectGrants?: InviteProjectGrant[],
+): Promise<InviteMemberOutcome> {
+  const response = await fetchTeamApi(`/api/teams/${orgId}/invite`, 'POST', {
+    email,
+    ...(role ? { role } : {}),
+    ...(projectGrants && projectGrants.length > 0 ? { projectGrants } : {}),
+  }, orgId) as InviteMemberOutcome | undefined;
+  return {
+    projectGrantsApplied: response?.projectGrantsApplied ?? 0,
+    projectGrantsFailed: response?.projectGrantsFailed ?? [],
+  };
 }
 
 /**
@@ -2504,18 +2602,7 @@ export function registerTeamHandlers(): void {
     }
   });
 
-  safeHandle('team:list', async (_event, options?: { forceRefresh?: boolean }) => {
-    try {
-      // The directory cache is invalidated by events (join/create/delete/auth
-      // change); `forceRefresh` backs the manual Refresh affordance in Account
-      // settings for the cases those events miss (e.g. invited from elsewhere).
-      if (options?.forceRefresh) invalidateListTeamsCache();
-      const teams = await listTeams();
-      return { success: true, teams };
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  });
+  registerOrganizationDirectoryHandler(listTeamDirectory, invalidateListTeamsCache);
 
   safeHandle('team:find-for-workspace', async (_event, workspacePath: string) => {
     try {
@@ -2646,10 +2733,16 @@ export function registerTeamHandlers(): void {
     }
   });
 
-  safeHandle('team:invite', async (_event, orgId: string, email: string, role?: InviteMemberRole) => {
+  safeHandle('team:invite', async (
+    _event,
+    orgId: string,
+    email: string,
+    role?: InviteMemberRole,
+    projectGrants?: InviteProjectGrant[],
+  ) => {
     try {
-      await inviteMember(orgId, email, role);
-      return { success: true };
+      const outcome = await inviteMember(orgId, email, role, projectGrants);
+      return { success: true, ...outcome };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }

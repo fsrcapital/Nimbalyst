@@ -16,13 +16,8 @@ import {
   sessionParentIdAtom,
 } from '../atoms/sessions';
 import { workstreamStateAtom } from '../atoms/workstreamState';
-import {
-  normalizeSessionWorkflowMetadata,
-  resolveSessionAttention,
-  sessionRefMapAtom,
-  type SessionMeta,
-  type SessionRefMeta,
-} from '@nimbalyst/runtime';
+import { sessionRefMapAtom, type SessionRefMeta } from '@nimbalyst/runtime/ui/AgentTranscript/session/sessionRefAtoms';
+import { normalizeSessionWorkflowMetadata, resolveSessionAttention, type SessionMeta } from '@nimbalyst/runtime';
 
 // Track pending refresh to debounce rapid-fire events
 let pendingRefreshTimer: NodeJS.Timeout | null = null;
@@ -130,7 +125,26 @@ export function initSessionListListeners(): () => void {
     const registry = new Map(store.get(sessionRegistryAtom));
     const meta = registry.get(sessionId);
     if (meta) {
-      registry.set(sessionId, applySessionMetadataUpdates(meta, updates));
+      registry.set(sessionId, {
+        ...meta,
+        ...(updates.phase !== undefined && { phase: updates.phase as string }),
+        ...(updates.tags !== undefined && { tags: updates.tags as string[] }),
+        ...(updates.title !== undefined && { title: updates.title as string }),
+        ...(updates.provider !== undefined && { provider: updates.provider as string }),
+        ...((updates.externalSource === 'claude-code' || updates.externalSource === 'openai-codex') && { externalSource: updates.externalSource }),
+        ...(typeof updates.externalLastActivityAt === 'number' && { externalLastActivityAt: updates.externalLastActivityAt }),
+        ...(updates.model !== undefined && { model: updates.model as string }),
+        ...(updates.sessionType !== undefined && {
+          sessionType: updates.sessionType as 'session' | 'workstream' | 'blitz' | 'voice'
+        }),
+        ...(updates.agentRole !== undefined && { agentRole: updates.agentRole as 'standard' | 'meta-agent' }),
+        ...(updates.createdBySessionId !== undefined && { createdBySessionId: updates.createdBySessionId as string | null }),
+        ...(updates.parentSessionId !== undefined && { parentSessionId: updates.parentSessionId as string | null }),
+        ...(updates.worktreeId !== undefined && { worktreeId: updates.worktreeId as string | null }),
+        ...(updates.updatedAt !== undefined && { updatedAt: updates.updatedAt as number }),
+        ...(updates.isArchived !== undefined && { isArchived: updates.isArchived as boolean }),
+        ...(updates.isPinned !== undefined && { isPinned: updates.isPinned as boolean }),
+      });
       store.set(sessionRegistryAtom, registry);
     }
   };

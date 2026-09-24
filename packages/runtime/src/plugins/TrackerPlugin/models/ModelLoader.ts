@@ -2,8 +2,9 @@
  * Model loader for built-in and custom tracker definitions
  */
 
-import { parseTrackerYAML } from './YAMLParser';
-import { globalRegistry, type TrackerDataModel } from './TrackerDataModel';
+import { parseTrackerYAML, parseTrackerTypeYAML } from '@nimbalyst/tracker-schema';
+import { globalRegistry, type TrackerDataModel } from '@nimbalyst/tracker-schema';
+import { parseTrackerSchemaPatchYAML, resolveTrackerSchemaPatch } from '@nimbalyst/tracker-schema';
 
 // Built-in tracker definitions are authored as YAML under ./builtins and bundled
 // as raw strings via Vite's `?raw` loader (see runtime/src/env.d.ts). This is the
@@ -18,6 +19,10 @@ import taskYaml from './builtins/task.yaml?raw';
 import ideaYaml from './builtins/idea.yaml?raw';
 import milestoneYaml from './builtins/milestone.yaml?raw';
 import releaseYaml from './builtins/release.yaml?raw';
+// Builtin knowledge evidence kinds, available independently of custom graph types.
+import sourceYaml from './builtins/source.yaml?raw';
+import captureYaml from './builtins/capture.yaml?raw';
+import citationYaml from './builtins/citation.yaml?raw';
 // import featureYaml from './builtins/feature.yaml?raw';
 // import automationYaml from './builtins/automation.yaml?raw';
 
@@ -33,6 +38,11 @@ export const BUILTIN_TRACKER_YAML: ReadonlyArray<{ type: string; yaml: string }>
   { type: 'idea', yaml: ideaYaml },
   { type: 'milestone', yaml: milestoneYaml },
   { type: 'release', yaml: releaseYaml },
+  // Load order matters for readability only, but it follows the evidence chain:
+  // a capture points at a source, a citation points at a capture.
+  { type: 'source', yaml: sourceYaml },
+  { type: 'capture', yaml: captureYaml },
+  { type: 'citation', yaml: citationYaml },
   // { type: 'feature', yaml: featureYaml },
   // { type: 'automation', yaml: automationYaml },
 ];
@@ -54,6 +64,38 @@ export function parseBuiltinTrackers(): TrackerDataModel[] {
   });
 }
 
+
+/**
+ * True for the `<type>.patch.yaml` shape, which carries only a delta from a
+ * builtin seed and legitimately has no `displayName`.
+ */
+export function isTrackerPatchFileName(fileName: string): boolean {
+  return /\.patch\.ya?ml$/i.test(fileName);
+}
+
+/**
+ * Resolve a workspace schema file's content to a fully-resolved model,
+ * whichever of the two on-disk shapes it is.
+ *
+ * Every reader of `.nimbalyst/trackers/*.yaml` must go through this. Running
+ * the full-model parser over a patch throws `Missing required field:
+ * displayName` — which is how the renderer silently dropped every builtin
+ * override on each workspace load, and how the Settings "Edit schema override"
+ * button silently did nothing (NIM-3065).
+ *
+ * Throws on a patch whose target type has no seed, so a stray patch surfaces
+ * instead of registering a broken model.
+ */
+export function resolveTrackerSchemaFileContent(
+  fileName: string,
+  content: string,
+): TrackerDataModel {
+  if (!isTrackerPatchFileName(fileName)) return parseTrackerYAML(content);
+  const patch = parseTrackerSchemaPatchYAML(content);
+  const seed = globalRegistry.getBuiltinModel(patch.type) ?? globalRegistry.get(patch.type);
+  if (!seed) throw new Error(`Tracker schema patch targets unknown type '${patch.type}'`);
+  return resolveTrackerSchemaPatch(seed, patch);
+}
 
 /**
  * Load all built-in tracker definitions
@@ -81,7 +123,9 @@ export function loadBuiltinTrackers(): void {
  * Load a custom tracker definition from YAML string
  */
 export function loadCustomTracker(yamlString: string): void {
-  const model = parseTrackerYAML(yamlString);
+  // Derived types (`extends`) register as their declared form; the registry
+  // resolves them against the base and re-resolves when the base changes.
+  const model = parseTrackerTypeYAML(yamlString);
   globalRegistry.register(model);
   console.log(`[TrackerPlugin] Loaded custom tracker: ${model.type}`);
 }

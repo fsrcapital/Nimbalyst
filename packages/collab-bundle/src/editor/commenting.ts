@@ -11,27 +11,52 @@ export interface CollabEditorCommentsState {
   capabilities: CommentCapabilities;
 }
 
+export interface DocumentCommentAccessInput {
+  orgId?: string | null;
+  projectId?: string | null;
+}
+
+export type DocumentCommentAccessCheck = (input: DocumentCommentAccessInput & {
+  action: 'view' | 'edit' | 'admin';
+}) => Promise<{ allowed: boolean }>;
+
+/**
+ * Resolve the desktop host's comment capability without borrowing edit access.
+ * Project view is the platform permission for reading and annotating a mockup;
+ * editing its HTML remains a separate action.
+ */
+export async function resolveDocumentCommentCapabilities(
+  canAccess: DocumentCommentAccessCheck,
+  input: DocumentCommentAccessInput,
+): Promise<CommentCapabilities> {
+  const readAccess = await canAccess({ ...input, action: 'view' });
+  return {
+    read: readAccess.allowed,
+    comment: readAccess.allowed,
+  };
+}
+
 /**
  * Whether this user may author comments, from the two facts that decide it.
  *
- * Neither is sufficient alone, and the failure modes are opposite.
+ * The host's role-derived answer is the grant, and a server verdict that
+ * refuses writes is the veto.
  *
- * `serverAccess` is transport-observed, and it only ever reaches `writable`
- * from a `write-acknowledged` signal -- that is, after a write the server has
- * already accepted. Deriving the gate from `serverAccess === 'writable'` alone
- * meant a writer who opened a document and had not typed yet sat at `unknown`
- * forever and never saw "Add comment" at all. That is not a race; there is no
- * later event that flips it, because `docSyncResponse` carries no
- * write-capability field and nothing else reports one.
+ * This deliberately does *not* require positive write evidence from the
+ * transport. `serverAccess` only reaches 'writable' when the server
+ * acknowledges a `docUpdate`, and the server emits that ack in no other
+ * circumstance -- so demanding it made commenting conditional on having first
+ * edited the document. Opening a shared document purely to annotate it, which
+ * is the whole point of the comment panel, was unreachable for every browser
+ * user regardless of role.
  *
- * The host's role-derived answer is not sufficient either: it is a snapshot of
- * org policy taken from the roster, blind to a document the server has since
- * made read-only or revoked mid-session.
- *
- * Only the AND is true at both ends. `unknown` is deliberately permissive on
- * the transport side -- it means "the server has not objected", and at that
- * point the host's answer is the one carrying the authority. A viewer is still
- * refused, because the host says so.
+ * The residual risk is a host projection that has gone stale: an org `member`
+ * whose project grant was downgraded is offered an affordance the server will
+ * refuse. That is bounded and self-correcting rather than silent -- the refusal
+ * arrives as `document_read_only`, which moves `serverAccess` to 'read-only'
+ * and withdraws the affordance here. The two roles that must never reach it,
+ * `viewer` and `guest`, are refused by the host answer itself and never depend
+ * on the veto.
  */
 export function deriveCollabEditorCommentsState(options: {
   connection: CollabEditorConnectionState;
@@ -41,14 +66,14 @@ export function deriveCollabEditorCommentsState(options: {
   hostCanComment: boolean;
 }): CollabEditorCommentsState {
   const hasConnectedOnce = options.hasConnectedOnce || options.connection === 'connected';
+  const serverRefusesWrites = options.serverAccess === 'read-only'
+    || options.serverAccess === 'revoked';
   return {
     hasConnectedOnce,
     isHydrated: hasConnectedOnce,
     capabilities: {
       read: true,
-      comment: options.hostCanComment
-        && options.serverAccess !== 'read-only'
-        && options.serverAccess !== 'revoked',
+      comment: options.hostCanComment && !serverRefusesWrites,
     },
   };
 }

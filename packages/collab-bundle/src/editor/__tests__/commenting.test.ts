@@ -1,26 +1,30 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { deriveCollabEditorCommentsState } from '../commenting';
+import {
+  deriveCollabEditorCommentsState,
+  resolveDocumentCommentCapabilities,
+} from '../commenting';
 
 describe('collab editor comments state', () => {
-  it('combines the host role answer with server access, and hydrates on first connection', () => {
-    // The regression this replaces: `unknown` was treated as "no comments".
-    // `writable` is only ever reached from a write acknowledgement, so a writer
-    // who had not typed yet never left `unknown` and never got the affordance.
-    const beforeAnyWrite = deriveCollabEditorCommentsState({
-      connection: 'syncing',
-      serverAccess: 'unknown',
-      hasConnectedOnce: false,
-      hostCanComment: true,
-    });
-    expect(beforeAnyWrite).toEqual({
-      hasConnectedOnce: false,
-      isHydrated: false,
-      capabilities: { read: true, comment: true },
-    });
+  it('lets a permitted host comment before it has written anything', () => {
+    // The regression this guards: `serverAccess` only reaches 'writable' when
+    // the server acknowledges a docUpdate, so a reader who opens a document to
+    // annotate it and never types stays at 'unknown' for the whole session.
+    // Requiring positive write evidence made commenting-without-editing
+    // unreachable for every web console user, admins included.
+    for (const serverAccess of ['unknown', 'writable', 'not-applicable'] as const) {
+      expect(deriveCollabEditorCommentsState({
+        connection: 'connected',
+        serverAccess,
+        hasConnectedOnce: true,
+        hostCanComment: true,
+      }).capabilities).toEqual({ read: true, comment: true });
+    }
+  });
 
-    // The host's answer is authoritative in the other direction: a viewer is
+  it('refuses when either the host role or the server says no', () => {
+    // The host's answer is authoritative in the negative direction: a viewer is
     // refused on a connection the server has said nothing about.
     for (const serverAccess of ['unknown', 'writable', 'not-applicable'] as const) {
       expect(deriveCollabEditorCommentsState({
@@ -31,7 +35,9 @@ describe('collab editor comments state', () => {
       }).capabilities).toEqual({ read: true, comment: false });
     }
 
-    // And a server restriction overrides a host that says yes.
+    // A server verdict that refuses writes overrides a host that says yes. This
+    // is how a stale role projection is withdrawn: the first rejected write
+    // moves `serverAccess` off 'unknown' and the affordance disappears.
     for (const serverAccess of ['read-only', 'revoked'] as const) {
       expect(deriveCollabEditorCommentsState({
         connection: 'connected',
@@ -40,10 +46,20 @@ describe('collab editor comments state', () => {
         hostCanComment: true,
       }).capabilities).toEqual({ read: true, comment: false });
     }
+  });
+
+  it('hydrates on first connection and stays hydrated across a drop', () => {
+    const beforeConnecting = deriveCollabEditorCommentsState({
+      connection: 'syncing',
+      serverAccess: 'unknown',
+      hasConnectedOnce: false,
+      hostCanComment: true,
+    });
+    expect(beforeConnecting.isHydrated).toBe(false);
 
     const connected = deriveCollabEditorCommentsState({
       connection: 'connected',
-      serverAccess: 'writable',
+      serverAccess: 'unknown',
       hasConnectedOnce: false,
       hostCanComment: true,
     });
@@ -58,5 +74,24 @@ describe('collab editor comments state', () => {
       hasConnectedOnce: connected.hasConnectedOnce,
       hostCanComment: true,
     }).isHydrated).toBe(true);
+  });
+});
+
+describe('document comment access', () => {
+  it('grants comment capability without requiring edit access', async () => {
+    const canAccess = vi.fn(async (input: { action: 'view' | 'edit' | 'admin' }) => ({
+      allowed: input.action === 'view',
+    }));
+
+    await expect(resolveDocumentCommentCapabilities(canAccess, {
+      orgId: 'org-1',
+      projectId: 'project-1',
+    })).resolves.toEqual({ read: true, comment: true });
+    expect(canAccess).toHaveBeenCalledTimes(1);
+    expect(canAccess).toHaveBeenCalledWith({
+      orgId: 'org-1',
+      projectId: 'project-1',
+      action: 'view',
+    });
   });
 });

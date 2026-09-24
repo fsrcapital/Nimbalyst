@@ -1,18 +1,20 @@
+// @vitest-environment node
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const updateMetadata = vi.fn();
 const getSession = vi.fn();
 const requestMobilePush = vi.fn();
 const notifyWebPushWaiting = vi.fn();
+const pushChange = vi.fn().mockResolvedValue({ published: true });
 const trayManager = { onPromptCreated: vi.fn(), onPromptResolved: vi.fn() };
 
-vi.mock('@nimbalyst/runtime', () => ({
+vi.mock('@nimbalyst/runtime/storage/repositories/AISessionsRepository', () => ({
   AISessionsRepository: {
     updateMetadata: (...args: unknown[]) => updateMetadata(...args),
     get: (...args: unknown[]) => getSession(...args),
   },
 }));
-vi.mock('../../SyncManager', () => ({ getSyncProvider: () => null }));
+vi.mock('../../SyncManager', () => ({ getSyncProvider: () => ({ pushChange }) }));
 vi.mock('../mobilePushRequest', () => ({
   requestMobilePush: (...args: unknown[]) => requestMobilePush(...args),
 }));
@@ -31,6 +33,13 @@ import {
   resetPendingPromptTracking,
   setSessionPendingPrompt,
 } from '../pendingPromptPersistence';
+import { logger } from '../../../utils/logger';
+
+it('warns with the session and reason when pending-prompt sync is not published', async () => {
+  pushChange.mockResolvedValueOnce({ published: false, reason: 'index disconnected' });
+  await setSessionPendingPrompt('unpublished-session', false);
+  expect(logger.main.warn).toHaveBeenCalledWith(expect.stringMatching(/unpublished-session.*index disconnected/));
+});
 
 describe('pending-prompt in-memory mirror (NIM-2208)', () => {
   beforeEach(() => {
@@ -87,11 +96,19 @@ describe('tray notification is part of persisting the bit', () => {
     trayManager.onPromptResolved.mockReset();
   });
 
-  it('tells the tray a prompt opened', async () => {
+  it('tells the tray a prompt opened, and what kind it is', async () => {
+    await setSessionPendingPrompt('s1', true, 'decision');
+
+    // The kind is what colours the menu bar strip's dot -- a tap versus
+    // thinking required -- so it has to survive the trip.
+    expect(trayManager.onPromptCreated).toHaveBeenCalledWith('s1', 'decision');
+    expect(trayManager.onPromptResolved).not.toHaveBeenCalled();
+  });
+
+  it('treats an unlabelled prompt as an approval', async () => {
     await setSessionPendingPrompt('s1', true);
 
-    expect(trayManager.onPromptCreated).toHaveBeenCalledWith('s1');
-    expect(trayManager.onPromptResolved).not.toHaveBeenCalled();
+    expect(trayManager.onPromptCreated).toHaveBeenCalledWith('s1', 'approval');
   });
 
   it('tells the tray a prompt resolved', async () => {
@@ -108,7 +125,7 @@ describe('tray notification is part of persisting the bit', () => {
 
     await setSessionPendingPrompt('s1', true);
 
-    expect(trayManager.onPromptCreated).toHaveBeenCalledWith('s1');
+    expect(trayManager.onPromptCreated).toHaveBeenCalledWith('s1', 'approval');
   });
 });
 

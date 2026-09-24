@@ -1,3 +1,4 @@
+import {selectedMachineAtom, machineSessionSelectionsAtom} from '../atoms/remoteMachines';
 /**
  * Action atoms for SessionHistory.
  *
@@ -21,6 +22,7 @@
 import { atom } from 'jotai';
 import { atomFamily } from '../debug/atomFamilyRegistry';
 import { resolveProviderFromModel } from '../../utils/modelUtils';
+import type { SessionLaunchSource } from '../../../shared/analytics/sessionLaunch';
 import { errorNotificationService } from '../../services/ErrorNotificationService';
 import {
   store,
@@ -38,6 +40,7 @@ import {
   markSessionReadAtom,
 } from '../index';
 import { activeWorkspacePathAtom } from '../atoms/openProjects';
+import { activeFileRepoPathAtom } from '../atoms/workspaceRepos';
 import { defaultAgentModelAtom, worktreesFeatureAvailableAtom, alphaFeatureEnabledAtom } from '../atoms/appSettings';
 import {
   workstreamStateAtom,
@@ -76,11 +79,16 @@ export const sessionQuickOpenRequestedAtom = atom<number>(0);
 export const blitzDialogOpenAtom = atom<boolean>(false);
 
 /**
- * Per-workspace git-repo flag. Populated by AgentMode from an IPC check on
- * workspace mount; consumed by SessionHistory and the New Worktree / New
- * Blitz action atoms to gate worktree creation.
+ * Per-workspace git-repo flag, `undefined` until the IPC answers. Populated
+ * by `useGitRepoProbe`, which every consumer mounts for itself; consumed by
+ * SessionHistory and the New Worktree / New Blitz action atoms to gate
+ * worktree creation.
+ *
+ * Gate on an explicit `false`. A falsy check cannot tell "not a repository"
+ * apart from "nobody has asked yet", which is how the worktree actions used
+ * to end up permanently disabled inside a repository.
  */
-export const isGitRepoAtom = atomFamily((_workspacePath: string) => atom<boolean>(false));
+export const isGitRepoAtom = atomFamily((_workspacePath: string) => atom<boolean | undefined>(undefined));
 
 export interface CreateNewWorktreeSessionOptions {
   baseBranch?: string;
@@ -98,6 +106,12 @@ export interface CreateNewSessionOptions {
   title?: string;
   /** Select the new session in Agent mode. Defaults to true for existing callers. */
   selectSession?: boolean;
+  /**
+   * Which surface asked for this session, for `create_ai_session` analytics.
+   * Optional: a caller that omits it is reported as `unknown` rather than being
+   * guessed at, because a wrong attribution is worse than a missing one here.
+   */
+  launchSource?: SessionLaunchSource;
 }
 
 // ============================================================
@@ -127,9 +141,12 @@ export const openSessionInTabActionAtom = atom(null, async (get, set, sessionId:
     const sessionListItem = result.sessions.find((s: any) => s.id === sessionId);
 
     const registry = get(sessionRegistryAtom);
+    set(selectedMachineAtom(workspacePath), sessionListItem?.remoteHostDeviceId ?? "");
+    set(machineSessionSelectionsAtom(workspacePath), previous => ({...previous, [sessionListItem?.remoteHostDeviceId ?? ""]: sessionId}));
     if (sessionListItem && !registry.has(sessionId)) {
       set(addSessionFullAtom, {
         id: sessionListItem.id,
+        remoteHostDeviceId: sessionListItem.remoteHostDeviceId,
         title: sessionListItem.title || 'Untitled Session',
         createdAt: sessionListItem.createdAt,
         updatedAt: sessionListItem.updatedAt,
@@ -231,6 +248,9 @@ export const selectSessionActionAtom = atom(null, async (get, set, sessionId: st
 
   const registry = get(sessionRegistryAtom);
   const sessionMeta = registry.get(sessionId);
+  const host = sessionMeta?.remoteHostDeviceId ?? "";
+  set(selectedMachineAtom(workspacePath), host);
+  set(machineSessionSelectionsAtom(workspacePath), previous => ({...previous, [host]: sessionId}));
 
   if (sessionMeta?.parentSessionId) {
     if (sessionMeta.worktreeId) {
@@ -408,6 +428,17 @@ export const createNewSessionActionAtom = atom(
       : input ?? {};
     const model = options.model ?? get(defaultAgentModelAtom);
     const title = options.title ?? 'New Session';
+    const host = get(selectedMachineAtom(workspacePath));
+    if (host) {
+      try {
+      const id = await window.electronAPI.invoke('ai:createRemoteSession', workspacePath, host, {model: options.model ?? (model?.startsWith('claude-code:') ? model : undefined)});
+      if (options.initialDraft) await window.electronAPI.invoke('ai:saveRemoteDraft', id, workspacePath, {text: options.initialDraft, attachments: []});
+      set(machineSessionSelectionsAtom(workspacePath), previous => ({...previous, [host]: id}));
+      if (options.selectSession !== false) window.dispatchEvent(new CustomEvent('open-ai-session', {detail: {sessionId: id, workspacePath}}));
+      return id;
+      } catch (error) { errorNotificationService.showError("Could not create remote session", String(error)); return undefined; }
+    }
+
 
     try {
       const sessionId = options.sessionId ?? crypto.randomUUID();
@@ -422,6 +453,10 @@ export const createNewSessionActionAtom = atom(
           metadata: options.metadata,
         },
         workspaceId: workspacePath,
+        launchSource: options.launchSource,
+        // A boolean, never the draft. The prompt text has no business crossing
+        // into a payload that feeds an analytics emitter.
+        hadPrefilledPrompt: !!options.initialDraft,
       });
 
       if (result.success && result.id) {
@@ -482,14 +517,22 @@ export const createNewWorktreeSessionActionAtom = atom(
     const workspacePath = getWorkspacePath(get);
     if (!workspacePath || typeof window === 'undefined' || !window.electronAPI) return undefined;
 
+    if (get(selectedMachineAtom(workspacePath))) {
+      errorNotificationService.showError("Remote worktree unavailable", "Worktrees are not supported by this remote host yet.");
+      return undefined;
+    }
     if (!get(worktreesFeatureAvailableAtom)) return undefined;
-    if (!get(isGitRepoAtom(workspacePath))) return undefined;
+    if (get(isGitRepoAtom(workspacePath)) === false) return undefined;
 
     const defaultModel = get(defaultAgentModelAtom);
 
     try {
-      const ipcOptions = options?.baseBranch || options?.name
-        ? { baseBranch: options.baseBranch, name: options.name }
+      // Which root the worktree is branched from. Follows the active file's
+      // repo, so a workspace spanning two repos branches the one being worked
+      // in; a single-folder project resolves to the workspace itself.
+      const sourceFolderPath = get(activeFileRepoPathAtom) ?? undefined;
+      const ipcOptions = options?.baseBranch || options?.name || sourceFolderPath
+        ? { baseBranch: options?.baseBranch, name: options?.name, sourceFolderPath }
         : undefined;
       const worktreeResult: WorktreeCreateResult = await window.electronAPI.invoke(
         'worktree:create',
@@ -512,6 +555,7 @@ export const createNewWorktreeSessionActionAtom = atom(
           worktreeId: worktree.id,
         },
         workspaceId: workspacePath,
+        launchSource: 'worktree' satisfies SessionLaunchSource,
       });
 
       if (result.success && result.id) {
@@ -586,6 +630,7 @@ export const createWorktreeSessionCoreActionAtom = atom(
         worktreeId: worktree.id,
       },
       workspaceId: workspacePath,
+      launchSource: 'worktree' satisfies SessionLaunchSource,
     });
 
     if (result.success && result.id) {
@@ -676,7 +721,7 @@ export const openNewBlitzDialogActionAtom = atom(null, (get, set) => {
   const workspacePath = getWorkspacePath(get);
   if (!workspacePath) return;
   if (!get(alphaFeatureEnabledAtom('blitz'))) return;
-  if (!get(isGitRepoAtom(workspacePath))) return;
+  if (get(isGitRepoAtom(workspacePath)) === false) return;
   set(blitzDialogOpenAtom, true);
 });
 

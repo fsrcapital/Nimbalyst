@@ -1,3 +1,4 @@
+import { ShellTrackingNotice } from './ShellTrackingNotice';
 /**
  * FilesEditedSidebar - Shows files edited by AI in the current workstream.
  *
@@ -49,6 +50,7 @@ import {
   type FileEditWithSession,
 } from '../../store/atoms/sessionFiles';
 import { registerSessionWorkspace, registerWorktreePath, loadInitialSessionFileState } from '../../store/listeners/fileStateListeners';
+import { workspaceRootPathsAtom } from '../../store/atoms/fileTree';
 import { isPathInWorkspace } from '../../../shared/pathUtils';
 import { FilesScopeDropdown } from './FilesScopeDropdown';
 import { GitOperationsPanel } from './GitOperationsPanel';
@@ -113,9 +115,26 @@ export const FilesEditedSidebar: React.FC<FilesEditedSidebarProps> = React.memo(
   const [filterToCurrentSession, setFilterToCurrentSession] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
 
+  /**
+   * Roots the sidebar treats as "in this workspace". A worktree session sees
+   * only its own checkout; otherwise every attached folder counts, so a file in
+   * one is listed and committable rather than silently filtered out.
+   */
+  const workspaceRootPaths = useAtomValue(workspaceRootPathsAtom);
+  const committableRoots = useMemo(
+    () => (worktreePath
+      ? [worktreePath]
+      : workspaceRootPaths.length > 0
+        ? workspaceRootPaths
+        : [workspacePath]),
+    [worktreePath, workspaceRootPaths, workspacePath]
+  );
+  /** False while `committableRoots` is still the primary-root-only fallback. */
+  const rootsLoaded = Boolean(worktreePath) || workspaceRootPaths.length > 0;
+
   const isWorkspaceCommittableFile = useCallback(
-    (filePath: string) => isPathInWorkspace(filePath, effectiveWorkspacePath),
-    [effectiveWorkspacePath]
+    (filePath: string) => committableRoots.some(root => isPathInWorkspace(filePath, root)),
+    [committableRoots]
   );
 
   const workspaceScopedFileEdits = useMemo(
@@ -133,9 +152,6 @@ export const FilesEditedSidebar: React.FC<FilesEditedSidebarProps> = React.memo(
 
   // Lazy load file state for all child sessions in the workstream
   useEffect(() => {
-    // Debug logging - uncomment if needed
-    // console.log('[FilesEditedSidebar] Loading file state for workstream', workstreamId, 'with', workstreamSessions.length, 'child sessions');
-
     // Load file state for the workstream itself (parent)
     loadInitialSessionFileState(workstreamId, effectiveWorkspacePath);
 
@@ -155,8 +171,8 @@ export const FilesEditedSidebar: React.FC<FilesEditedSidebarProps> = React.memo(
   // Checkboxes are always shown in the new unified design
   const stagedFilesArr = useAtomValue(workstreamStagedFilesAtom(workstreamId));
   const stagedFiles = useMemo(
-    () => new Set(stagedFilesArr.filter((filePath) => isPathInWorkspace(filePath, effectiveWorkspacePath))),
-    [stagedFilesArr, effectiveWorkspacePath]
+    () => new Set(stagedFilesArr.filter(isWorkspaceCommittableFile)),
+    [stagedFilesArr, isWorkspaceCommittableFile]
   );
   const setStagedFilesAction = useSetAtom(setWorkstreamStagedFilesAtom);
 
@@ -164,12 +180,18 @@ export const FilesEditedSidebar: React.FC<FilesEditedSidebarProps> = React.memo(
     if (worktreeId) {
       return;
     }
+    // `committableRoots` falls back to the primary root alone until the root
+    // list arrives. Pruning against that fallback would permanently drop a
+    // staged file in an attached folder, so wait for the real roots.
+    if (!rootsLoaded) {
+      return;
+    }
 
-    const sanitized = stagedFilesArr.filter((filePath) => isPathInWorkspace(filePath, effectiveWorkspacePath));
+    const sanitized = stagedFilesArr.filter(isWorkspaceCommittableFile);
     if (sanitized.length !== stagedFilesArr.length) {
       setStagedFilesAction({ workstreamId, files: sanitized });
     }
-  }, [effectiveWorkspacePath, stagedFilesArr, setStagedFilesAction, workstreamId, worktreeId]);
+  }, [isWorkspaceCommittableFile, rootsLoaded, stagedFilesArr, setStagedFilesAction, workstreamId, worktreeId]);
 
   // File scope mode for filtering what files to show (workspace-level setting)
   const fileScopeMode = useAtomValue(agentFileScopeModeAtom);
@@ -527,7 +549,7 @@ export const FilesEditedSidebar: React.FC<FilesEditedSidebarProps> = React.memo(
 
   return (
     <div className="files-edited-sidebar shrink-0 flex flex-col h-full bg-[var(--nim-bg-secondary)]" style={{ width }}>
-      {/* Header with scope dropdown and controls */}
+      <ShellTrackingNotice sessionIds={filterToCurrentSession && activeSessionId ? [activeSessionId] : [workstreamId, ...workstreamSessions]} />
       <div className="files-edited-sidebar__header flex items-center gap-2 px-3 py-2 border-b border-[var(--nim-border)] bg-[var(--nim-bg-secondary)] shrink-0">
         <FilesScopeDropdown
           fileScopeMode={fileScopeMode}
@@ -598,6 +620,7 @@ export const FilesEditedSidebar: React.FC<FilesEditedSidebarProps> = React.memo(
             fileEdits={fileEdits}
             onFileClick={onFileClick}
             workspacePath={worktreePath || workspacePath}
+            workspaceRoots={committableRoots}
             pendingReviewFiles={pendingReviewFiles}
             groupByDirectory={groupByDirectory}
             onGroupByDirectoryChange={setGroupByDirectory}

@@ -30,8 +30,14 @@ vi.mock('../../utils/store', () => ({
   isAnalyticsEnabled: () => true,
 }));
 
-vi.mock('@nimbalyst/runtime/plugins/TrackerPlugin/models/TrackerDataModel', () => ({
-  globalRegistry: { get: vi.fn(() => undefined) },
+vi.mock('../../../../../tracker-schema/src/TrackerDataModel', () => ({
+  globalRegistry: {
+    get: vi.fn(() => undefined),
+    // The policy resolver reads by explicit workspace (NIM-3702). Returning
+    // undefined here keeps these rows on the builtin/caller policy path.
+    getForWorkspace: vi.fn(() => undefined),
+    hasWorkspaceLayer: () => true,
+  },
 }));
 
 import { ElectronDocumentService } from '../ElectronDocumentService';

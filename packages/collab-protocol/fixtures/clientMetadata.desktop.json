@@ -1,0 +1,20 @@
+{
+  "currentContext": {
+    "tokens": 12000,
+    "contextWindow": 200000
+  },
+  "hasPendingPrompt": true,
+  "phase": "implementing",
+  "tags": [
+    "sync"
+  ],
+  "myNotes": "Keep the reviewer context visible",
+  "nextAction": "Run validation",
+  "waitingOn": "Reviewer feedback",
+  "attentionReasons": [
+    "user-input"
+  ],
+  "draftInput": "Review the queued changes",
+  "draftUpdatedAt": 1789232406000,
+  "hasBeenNamed": true
+}

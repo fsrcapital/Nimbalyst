@@ -4,6 +4,8 @@ import { MCP_CORE, MCP_TRACKERS } from '@nimbalyst/runtime/ai/server';
 vi.mock('../../utils/store', () => ({
   isSettingsAgentToolsDisabled: vi.fn(() => false),
   isTrackersAgentToolsEnabled: vi.fn((workspacePath: string) => workspacePath !== '/trackers-off'),
+  getWebPushState: vi.fn(() => undefined),
+  setWebPushState: vi.fn(),
 }));
 
 vi.mock('../mcpWorkspaceResolver', () => ({

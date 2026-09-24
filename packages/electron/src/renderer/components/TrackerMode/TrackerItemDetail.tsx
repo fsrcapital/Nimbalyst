@@ -12,12 +12,22 @@ import { useAtomValue, useSetAtom } from 'jotai';
 import { NimbalystEditor, MaterialSymbol, ProviderIcon } from '@nimbalyst/runtime';
 import type { EditorConfig } from '@nimbalyst/runtime/editor';
 import { $convertFromEnhancedMarkdownString, getEditorTransformers } from '@nimbalyst/runtime/editor';
-import { $getRoot, $setSelection } from 'lexical';
+import { $getRoot, $setSelection, type LexicalEditor } from 'lexical';
+import { TrackerSavedDescription } from './TrackerSavedDescription';
+import { TrackerCreationPublication } from '../TrackerQuickCreate/TrackerCreationPublication';
 import * as Y from 'yjs';
 import type { TrackerRecord } from '@nimbalyst/runtime/core/TrackerRecord';
+import {
+  copyTextToClipboard,
+  NEUTRAL_SWATCH,
+  PRIORITY_COLORS,
+  STATUS_COLORS,
+  TrackerSwatchBadge,
+  TYPE_COLORS,
+} from '@nimbalyst/collab-client/trackers-ui';
 import { isFileBackedRecord, isNativeItem, resolveTrackerContentMode } from './trackerContentMode';
 import { globalRegistry } from '@nimbalyst/runtime/plugins/TrackerPlugin/models';
-import type { FieldDefinition } from '@nimbalyst/runtime/plugins/TrackerPlugin/models/TrackerDataModel';
+import type { FieldDefinition } from '@nimbalyst/tracker-schema';
 import { getRecordTitle, getRecordStatus, getRecordPriority, getRecordField, isItemPublished as recordIsPublished, getItemPublicationState, type TrackerItemPublicationState } from '@nimbalyst/runtime/plugins/TrackerPlugin/trackerRecordAccessors';
 import { TrackerPublicationChip } from '@nimbalyst/runtime/plugins/TrackerPlugin/components/TrackerPublicationChip';
 import { resolveTrackerWriteAccess, TRACKER_LOCAL_ISSUE_KEY_MESSAGE, TRACKER_UNASSIGNED_ISSUE_KEY_MESSAGE } from '@nimbalyst/runtime/plugins/TrackerPlugin/models/trackerLifecycle';
@@ -27,6 +37,7 @@ import { TrackerFieldPills } from '@nimbalyst/runtime/plugins/TrackerPlugin/comp
 import { getTrackerTagsField, useTrackerChipFieldSections } from '@nimbalyst/runtime/plugins/TrackerPlugin/components/trackerChipFields';
 import { isTrackerFieldEmpty } from '@nimbalyst/runtime/plugins/TrackerPlugin/components/trackerFieldLayout';
 import { useTrackerRelationshipCandidates } from '@nimbalyst/runtime/plugins/TrackerPlugin/components/useTrackerRelationshipCandidates';
+import { useTrackerCitationHost } from './useTrackerCitationHost';
 import { UserAvatar } from '@nimbalyst/runtime/plugins/TrackerPlugin/components/UserAvatar';
 import { trackerItemByIdAtom, trackerItemsMapAtom, trackerDataLoadedAtom } from '@nimbalyst/runtime/plugins/TrackerPlugin/trackerDataAtoms';
 import { resolveRelationshipType } from '@nimbalyst/runtime/plugins/TrackerPlugin/models';
@@ -106,30 +117,6 @@ interface TrackerItemDetailProps {
 /** How this item's body is edited -- see the `contentMode` memo below. */
 export type TrackerContentMode = 'file-backed' | 'local-pglite' | 'collaborative';
 
-const STATUS_COLORS: Record<string, string> = {
-  'to-do': '#6b7280',
-  'in-progress': '#eab308',
-  'in-review': '#8b5cf6',
-  'done': '#22c55e',
-  'blocked': '#ef4444',
-};
-
-const PRIORITY_COLORS: Record<string, string> = {
-  critical: '#dc2626',
-  high: '#f97316',
-  medium: '#eab308',
-  low: '#6b7280',
-};
-
-const TYPE_COLORS: Record<string, string> = {
-  bug: '#dc2626',
-  task: '#2563eb',
-  plan: '#7c3aed',
-  idea: '#ca8a04',
-  decision: '#8b5cf6',
-  feature: '#10b981',
-};
-
 function getTypeIcon(type: string): string {
   const icons: Record<string, string> = {
     bug: 'bug_report',
@@ -176,7 +163,7 @@ const TypeTagsEditor: React.FC<{
   onUpdate: (tags: string[]) => void;
 }> = ({ typeTags, primaryType, onUpdate }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const allModels = globalRegistry.getAll().filter(m => m.primaryCapable !== false && m.creatable !== false);
+  const allModels = globalRegistry.getListed().filter(m => m.primaryCapable !== false && m.creatable !== false);
   const secondaryTags = typeTags.filter(t => t !== primaryType);
   const availableTypes = allModels.filter(m => m.type !== primaryType && !typeTags.includes(m.type));
 
@@ -195,7 +182,7 @@ const TypeTagsEditor: React.FC<{
         <div className="flex flex-wrap gap-1">
           {secondaryTags.map(tag => {
             const tagModel = globalRegistry.get(tag);
-            const tagColor = TYPE_COLORS[tag] || '#6b7280';
+            const tagColor = TYPE_COLORS[tag] || NEUTRAL_SWATCH;
             return (
               <span
                 key={tag}
@@ -214,7 +201,7 @@ const TypeTagsEditor: React.FC<{
       {isOpen && availableTypes.length > 0 && (
         <div className="flex flex-wrap gap-1 pt-1">
           {availableTypes.map(m => {
-            const tagColor = TYPE_COLORS[m.type] || '#6b7280';
+            const tagColor = TYPE_COLORS[m.type] || NEUTRAL_SWATCH;
             return (
               <button
                 key={m.type}
@@ -300,7 +287,7 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
     if (!item || !teamOrgId) return;
     const url = buildTrackerDeepLink(item.id, teamOrgId);
     try {
-      await navigator.clipboard.writeText(url);
+      await copyTextToClipboard(url);
       errorNotificationService.showInfo(
         'Link copied',
         'Paste it anywhere to open this tracker in Nimbalyst.',
@@ -375,7 +362,7 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
     })();
     return () => { cancelled = true; };
   }, [teamOrgId]);
-  const typeColor = TYPE_COLORS[item?.primaryType ?? ''] || '#6b7280';
+  const typeColor = TYPE_COLORS[item?.primaryType ?? ''] || NEUTRAL_SWATCH;
   const icon = model?.icon || getTypeIcon(item?.primaryType ?? '');
 
   // External-source provenance (source chip). origin lives in record system metadata.
@@ -487,7 +474,6 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
   const [localTitle, setLocalTitle] = useState(item ? getRecordTitle(item) : '');
   // Title is a textarea so long titles wrap; it grows with its content (NIM-1615).
   const titleRef = useAutoSizedTitle(localTitle);
-  const [localDescription, setLocalDescription] = useState(item ? (item.fields.description as string ?? '') : '');
   const [localCustomFields, setLocalCustomFields] = useState<Record<string, any>>({});
   // Per-field debounce timers (not one shared timer) so editing one field never
   // drops another field's pending save, and so reconciliation can tell which
@@ -535,7 +521,6 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
   useEffect(() => {
     if (!item) return;
     setLocalTitle(getRecordTitle(item));
-    setLocalDescription(item.fields.description as string ?? '');
     setLocalCustomFields({});
     // Clear any stale per-field debounce timers from the previous item and seed
     // the reconciliation baseline with the new item's persisted fields.
@@ -858,6 +843,8 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
   // re-create -- a new config identity remounts the editor and drops the
   // Y.Doc binding -- and republished on unmount so a stale editor never
   // outlives the item.
+  const [recoveryEditor, setRecoveryEditor] = useState<LexicalEditor | null>(null);
+  useEffect(() => setRecoveryEditor(null), [itemId]);
   const bodyEditorReadyRef = useRef(onBodyEditorReady);
   bodyEditorReadyRef.current = onBodyEditorReady;
   useEffect(() => () => bodyEditorReadyRef.current?.(null), [itemId]);
@@ -1043,8 +1030,6 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
   const handleTextFieldChange = useCallback((fieldName: string, value: any) => {
     if (fieldName === 'title') {
       setLocalTitle(value);
-    } else if (fieldName === 'description') {
-      setLocalDescription(value);
     } else {
       setLocalCustomFields(prev => ({ ...prev, [fieldName]: value }));
     }
@@ -1109,6 +1094,7 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
   );
 
   const relationshipCandidates = useTrackerRelationshipCandidates(item, chipFields);
+  const citationHost = useTrackerCitationHost();
 
   /** Field values with any in-progress local edit applied. */
   const chipValues = useMemo(
@@ -1190,6 +1176,7 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
         }
       },
       onEditorReady: (editor: any) => {
+        setRecoveryEditor(editor);
         bodyEditorReadyRef.current?.(editor);
       },
     };
@@ -1205,12 +1192,6 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
     // back to the per-item PGLite markdown for new items that have never
     // been saved (no cache row yet).
     const hookInitial = collabConfig.initialEditorState;
-    // electron-log's renderer transport serializes only the first arg
-    // as a string -- inline the diagnostic into the message itself so
-    // a future cold-paint failure is debuggable from the log file.
-    console.log(
-      `[TrackerItemDetail] Building collab editor config itemId=${item?.id} shouldBootstrap=${collabConfig.shouldBootstrap} mdContentLen=${mdContent?.length ?? 0} hasHookInitial=${!!hookInitial}`,
-    );
     return {
       isRichText: true,
       editable: true,
@@ -1222,17 +1203,14 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
       collaboration: {
         ...collabConfig,
         initialEditorState: hookInitial
-          ?? (mdContent
+          ?? (collabConfig.shouldBootstrap && mdContent
             ? () => {
-                console.log('[TrackerItemDetail] initialEditorState fn CALLED',
-                  { itemId: item?.id, mdContentLen: mdContent.length });
                 // Clearing a selected node without moving selection first makes
                 // Lexical throw "selection has been lost ..." (NIM-2005).
                 $setSelection(null);
                 const root = $getRoot();
                 root.clear();
                 $convertFromEnhancedMarkdownString(mdContent, getEditorTransformers());
-                console.log('[TrackerItemDetail] seeded editor root, children:', root.getChildrenSize());
               }
             : undefined),
       },
@@ -1253,6 +1231,7 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
         // editor reference we cannot recover when CollaborationPlugin's
         // bootstrap check declines to fire `initialEditorState`.
         collabEditorInstanceRef.current = editor;
+        setRecoveryEditor(editor);
         bodyEditorReadyRef.current?.(editor);
       },
     };
@@ -1323,19 +1302,13 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
               .filter(tag => tag !== item.primaryType)
               .map(tag => {
                 const tagModel = globalRegistry.get(tag);
-                const tagColor = TYPE_COLORS[tag] || '#6b7280';
                 return (
-                  <span
+                  <TrackerSwatchBadge
                     key={tag}
-                    className="text-[10px] font-medium px-1.5 py-0.5 rounded"
-                    style={{
-                      color: tagColor,
-                      backgroundColor: `${tagColor}15`,
-                      border: `1px solid ${tagColor}30`,
-                    }}
-                  >
-                    {tagModel?.displayName || tag}
-                  </span>
+                    label={tagModel?.displayName || tag}
+                    color={TYPE_COLORS[tag] || NEUTRAL_SWATCH}
+                    variant="secondary"
+                  />
                 );
               })}
             {isNativeItem(item) && (
@@ -1714,6 +1687,7 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
               editable={editable}
               teamMembers={teamMembers}
               relationshipCandidates={relationshipCandidates}
+              citationHost={citationHost}
               onSave={handleChipSave}
               onOpenItem={onOpenItem}
               onCreateCollection={workspacePath ? handleCreateCollection : undefined}
@@ -1777,6 +1751,11 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
             Content
           </label>
           )}
+          {hasRichContent && workspacePath && <TrackerCreationPublication workspacePath={workspacePath} itemId={item.id} />}
+          {hasRichContent && typeof item.fields.description === 'string' && <TrackerSavedDescription
+            key={item.id} description={item.fields.description} currentBody={contentMarkdown} editor={recoveryEditor}
+            canInsert={editable && contentLoaded && (contentMode === 'local-pglite' || (contentMode === 'collaborative' && hasSyncedOnce && collabStatus === 'connected'))}
+          />}
           {contentMode === 'local-pglite' && localEditorConfig ? (
             <div
               className={`tracker-content-editor bg-nim overflow-hidden ${focusActive ? 'flex-1 min-h-0' : 'min-h-[200px] border border-nim rounded'}`}
@@ -2034,7 +2013,7 @@ const ReadOnlyField: React.FC<{ field: FieldDefinition; value: any }> = ({ field
   if (field.type === 'select' && field.options && value) {
     const option = field.options.find(o => o.value === value);
     if (option) {
-      const color = option.color || STATUS_COLORS[value] || PRIORITY_COLORS[value] || '#6b7280';
+      const color = option.color || STATUS_COLORS[value] || PRIORITY_COLORS[value] || NEUTRAL_SWATCH;
       return (
         <div className="flex flex-col gap-1">
           <span className="text-[11px] font-medium text-[var(--nim-text-muted)] uppercase tracking-[0.5px]">{label}</span>

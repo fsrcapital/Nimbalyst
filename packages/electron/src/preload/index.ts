@@ -1,7 +1,9 @@
+import type { OrganizationDirectoryResult } from '../shared/organizationDirectory';
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { createIpcSubscriber } from './ipcSubscriptions.ts';
 import {ClaudeForWindowsInstallation} from "../main/services/CLIManager.ts";
 import type { GhCliStatus } from '../main/services/GhCliDetector.ts';
+import type { GitStatusChangedPayload } from '../main/services/GitStatusRefreshCoordinator.ts';
 import type {
   AppendLocalReplicaUpdateInput,
   AppendRemoteReplicaUpdatesInput,
@@ -30,6 +32,15 @@ import type {
   FeedbackRequestServiceTarget,
 } from '../shared/feedbackRequest.ts';
 import type { TutorialEntryPoint, TutorialStartResult, TutorialStatusResult } from '../shared/tutorial.ts';
+import type {
+  OpenCodeModelCatalogIpcResponse,
+  OpenCodeModelCatalogRefreshRequest,
+  OpenCodeModelCatalogRequest,
+} from '../shared/openCodeModelCatalog.ts';
+import type {
+  OpenCodeAgentCatalogIpcResponse,
+  OpenCodeAgentCatalogRequest,
+} from '../shared/openCodeAgentCatalog.ts';
 
 type StytchAuthFlowOptions = {
   intent: 'sign-in' | 'add-account' | 'reauth';
@@ -125,6 +136,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onAgentNewSession: (callback: () => void) => {
     ipcRenderer.on('agent-new-session', callback);
     return () => ipcRenderer.removeListener('agent-new-session', callback);
+  },
+  onCreateInTree: (callback: (kind: string) => void) => {
+    const handler = (_event: unknown, kind: string) => callback(kind);
+    ipcRenderer.on('create-in-tree', handler);
+    return () => ipcRenderer.removeListener('create-in-tree', handler);
   },
   onFileOpen: (callback: () => void) => {
     ipcRenderer.on('file-open', callback);
@@ -364,6 +380,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Window operations
   setDocumentEdited: (edited: boolean) => ipcRenderer.send('set-document-edited', edited),
   setTitle: (title: string) => ipcRenderer.send('set-title', title),
+  /** Point the window's AXDocument at the visible document; null clears it. */
+  setRepresentedFile: (filePath: string | null) => ipcRenderer.send('set-represented-file', filePath),
   openAccountSettings: () => ipcRenderer.invoke('app:open-account-settings'),
   /** Report user activity for sync presence awareness */
   reportUserActivity: () => ipcRenderer.send('user-activity'),
@@ -377,6 +395,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Workspace operations
   getFolderContents: (dirPath: string) => ipcRenderer.invoke('get-folder-contents', dirPath),
   refreshFolderContents: (folderPath: string) => ipcRenderer.invoke('refresh-folder-contents', folderPath),
+  getFolderFilesRecursive: (folderPath: string): Promise<{ files: string[]; truncated: boolean }> =>
+    ipcRenderer.invoke('get-folder-files-recursive', folderPath),
   createFile: (filePath: string, content: string) => ipcRenderer.invoke('create-file', filePath, content),
   createFolder: (folderPath: string) => ipcRenderer.invoke('create-folder', folderPath),
   switchWorkspaceFile: (filePath: string) => ipcRenderer.invoke('switch-workspace-file', filePath),
@@ -594,6 +614,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAIModels: () => ipcRenderer.invoke('ai:getModels'),
   // Aliases for consistency with component naming
   aiGetSettings: () => ipcRenderer.invoke('ai:getSettings'),
+  aiGetHeadlessAgentAvailability: () => ipcRenderer.invoke('ai:getHeadlessAgentAvailability'),
   aiSaveSettings: (settings: any) => ipcRenderer.invoke('ai:saveSettings', settings),
   aiTestConnection: (provider: string, workspacePath?: string) =>
     ipcRenderer.invoke('ai:testConnection', provider, workspacePath),
@@ -601,6 +622,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiGetAllModels: () => ipcRenderer.invoke('ai:getAllModels'),
   aiClearModelCache: () => ipcRenderer.invoke('ai:clearModelCache'),
   aiRefreshSessionProvider: (sessionId: string) => ipcRenderer.invoke('ai:refreshSessionProvider', sessionId),
+  openCodeModelCatalogGet: (
+    request: OpenCodeModelCatalogRequest
+  ): Promise<OpenCodeModelCatalogIpcResponse> =>
+    ipcRenderer.invoke('opencode-model-catalog:get', request),
+  openCodeModelCatalogRefresh: (
+    request: OpenCodeModelCatalogRefreshRequest
+  ): Promise<OpenCodeModelCatalogIpcResponse> =>
+    ipcRenderer.invoke('opencode-model-catalog:refresh', request),
+  openCodeAgentCatalogGet: (
+    request: OpenCodeAgentCatalogRequest
+  ): Promise<OpenCodeAgentCatalogIpcResponse> =>
+    ipcRenderer.invoke('opencode-agent-catalog:get', request),
 
   // Per-session MCP status (NIM-2272). Pull for first render, push for live
   // transitions — the push listener only exists once a message has been sent.
@@ -614,6 +647,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // CLI management
   cliCheckInstallation: (tool: string) => ipcRenderer.invoke('cli:checkInstallation', tool),
+  cliGetInstallStrategy: (tool: string) => ipcRenderer.invoke('cli:getInstallStrategy', tool),
   cliInstall: (tool: string, options: any) => ipcRenderer.invoke('cli:install', tool, options),
   cliUninstall: (tool: string) => ipcRenderer.invoke('cli:uninstall', tool),
   cliUpgrade: (tool: string) => ipcRenderer.invoke('cli:upgrade', tool),
@@ -632,7 +666,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('ai:error', handler);
     return () => ipcRenderer.removeListener('ai:error', handler);
   },
-  onAIApplyDiff: (callback: (data: { replacements: any[], resultChannel: string, targetFilePath?: string }) => void) => {
+  onAIApplyDiff: (callback: (data: { replacements: any[], resultChannel: string, targetFilePath?: string, workspacePath?: string, agent?: { sessionId: string; sessionName: string } }) => void) => {
     const handler = (_event: any, data: any) => callback(data);
     ipcRenderer.on('ai:applyDiff', handler);
     return () => ipcRenderer.removeListener('ai:applyDiff', handler);
@@ -697,7 +731,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // MCP Server operations
-  onMcpApplyDiff: (callback: (data: { replacements: any[], resultChannel: string }) => void) => {
+  onMcpApplyDiff: (callback: (data: { replacements: any[], resultChannel: string, targetFilePath?: string, workspacePath?: string, agent?: { sessionId: string; sessionName: string } }) => void) => {
     const handler = (_event: any, data: any) => callback(data);
     ipcRenderer.on('mcp:applyDiff', handler);
     return () => ipcRenderer.removeListener('mcp:applyDiff', handler);
@@ -707,12 +741,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('mcp:streamContent', handler);
     return () => ipcRenderer.removeListener('mcp:streamContent', handler);
   },
-  onMcpReadCollabDoc: (callback: (data: { targetFilePath: string, resultChannel: string }) => void) => {
+  onMcpReadCollabDoc: (callback: (data: { targetFilePath: string, resultChannel: string, workspacePath?: string, includeDecisionState?: boolean }) => void) => {
     const handler = (_event: any, data: any) => callback(data);
     ipcRenderer.on('mcp:readCollabDoc', handler);
     return () => ipcRenderer.removeListener('mcp:readCollabDoc', handler);
   },
-  sendMcpReadCollabDocResult: (resultChannel: string, result: { success: boolean; content?: string; error?: string }) => {
+  sendMcpReadCollabDocResult: (resultChannel: string, result: { success: boolean; content?: string; decisionState?: unknown; error?: string; code?: string }) => {
     ipcRenderer.send(resultChannel, result);
   },
   onMcpReadCollabDocComments: (callback: (data: any) => void) => {
@@ -733,6 +767,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sendMcpCollabDocCommentResult: (
     resultChannel: string,
     result: { success: boolean; result?: unknown; code?: string; error?: string },
+  ) => {
+    ipcRenderer.send(resultChannel, result);
+  },
+  // Project Canvas working-set declaration (agent presence on a board).
+  onMcpCanvasWorkingSet: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('mcp:canvasWorkingSet', handler);
+    return () => ipcRenderer.removeListener('mcp:canvasWorkingSet', handler);
+  },
+  sendMcpCanvasWorkingSetResult: (
+    resultChannel: string,
+    result: {
+      success: boolean;
+      published?: boolean;
+      nodeIds?: string[];
+      code?: string;
+      error?: string;
+    },
   ) => {
     ipcRenderer.send(resultChannel, result);
   },
@@ -907,12 +959,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
       priority: string;
       workspace: string;
       description?: string;
+      creationRequestId?: string;
+      content?: unknown;
       owner?: string;
       tags?: string[];
       customFields?: Record<string, any>;
       sharing?: 'personal' | 'team';
       draftByDefault?: boolean;
-    }) => ipcRenderer.invoke('document-service:create-tracker-item', item) as Promise<{ success: boolean; item?: any; error?: string }>,
+    }) => ipcRenderer.invoke('document-service:create-tracker-item', item) as Promise<{ success: boolean; item?: any; error?: string; publication?: import("@nimbalyst/runtime/core/trackerCreation").TrackerCreationPublication }>,
+    publishTrackerCreation: (payload: { workspacePath: string; itemId: string }) => ipcRenderer.invoke('tracker-creation:publish', payload) as Promise<import('@nimbalyst/runtime/core/trackerCreation').TrackerCreationPublication>,
+    getTrackerCreationStatus: (payload: { workspacePath: string; itemId: string }) => ipcRenderer.invoke('tracker-creation:status', payload) as Promise<import('@nimbalyst/runtime/core/trackerCreation').TrackerCreationPublication | null>,
+    listPendingTrackerCreations: (workspacePath: string) => ipcRenderer.invoke('tracker-creation:pending', { workspacePath }) as Promise<string[]>,
+    stageTrackerImage: (payload: { workspacePath: string; bytes: ArrayBuffer; mimeType: string }) => ipcRenderer.invoke('tracker-creation:stage-image', payload) as Promise<{ relativePath: string }>,
     updateTrackerItem: (payload: {
       itemId: string;
       updates: Record<string, any>;
@@ -1033,6 +1091,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
           snippet: string;
           score: number;
           signals: { dense: boolean; sparse: boolean };
+          /** Raw pre-fusion scores; `score` is an RRF rank and carries no threshold. */
+          similarity?: { cosine?: number; bm25?: number };
         }>
       >,
   },
@@ -1410,6 +1470,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
           teamMemberId: TeamMemberId;
         };
         error?: string;
+        retryable?: boolean;
       }>,
     // WebSocket proxy: create WebSocket connections in main process (Node.js)
     // to work around Cloudflare blocking browser WebSocket upgrades
@@ -1526,7 +1587,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
 
   // Worktree operations
-  worktreeCreate: (workspacePath: string, options?: { name?: string; baseBranch?: string }) =>
+  worktreeCreate: (workspacePath: string, options?: { name?: string; baseBranch?: string; sourceFolderPath?: string }) =>
     ipcRenderer.invoke('worktree:create', workspacePath, options),
   worktreeGetStatus: (worktreePath: string, options?: { fetchFirst?: boolean }) =>
     ipcRenderer.invoke('worktree:get-status', worktreePath, options),
@@ -1647,6 +1708,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   analytics: {
     allowedToSendAnalytics: () => ipcRenderer.invoke('analytics:allowed'),
     getDistinctId: () => ipcRenderer.invoke('analytics:get-distinct-id'),
+    getReleaseAttribution: () => ipcRenderer.invoke('analytics:get-release-attribution'),
     optIn: () => ipcRenderer.invoke('analytics:opt-in'),
     optOut: () => ipcRenderer.invoke('analytics:opt-out'),
     setSessionId: (sessionId: string) => ipcRenderer.invoke('analytics:set-session-id', sessionId),
@@ -1719,7 +1781,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Team Management (all member ops take explicit orgId -- per-workspace, not global)
   team: {
-    list: (options?: { forceRefresh?: boolean }) => ipcRenderer.invoke('team:list', options),
+    list: (options?: { forceRefresh?: boolean }): Promise<OrganizationDirectoryResult> => ipcRenderer.invoke('team:list', options),
     /** Open (or focus + retarget) the dedicated org-management window. */
     openManagementWindow: (target?: {
       orgId?: string;
@@ -1794,7 +1856,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Typed organization facade. The legacy `team` bridge remains as a
   // compatibility adapter while settings and older extensions migrate.
   organization: {
-    list: () => ipcRenderer.invoke('team:list'),
+    list: (): Promise<OrganizationDirectoryResult> => ipcRenderer.invoke('team:list'),
     get: (orgId: string) => ipcRenderer.invoke('team:get', orgId),
     rename: (orgId: string, name: string) =>
       ipcRenderer.invoke('team:rename', orgId, name),
@@ -1804,8 +1866,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('team:find-pending-invite-for-email', email),
     acceptInvitation: (orgId: string) => ipcRenderer.invoke('team:accept-invite', orgId),
     listMembers: (orgId: string) => ipcRenderer.invoke('team:list-members', orgId),
-    inviteMember: (orgId: string, email: string, role?: 'owner' | 'admin' | 'member' | 'viewer' | 'guest') =>
-      ipcRenderer.invoke('team:invite', orgId, email, role),
+    inviteMember: (
+      orgId: string,
+      email: string,
+      role?: 'owner' | 'admin' | 'member' | 'viewer' | 'guest',
+      projectGrants?: Array<{ teamProjectId: string; projectRole: string }>,
+    ) => ipcRenderer.invoke('team:invite', orgId, email, role, projectGrants),
     removeMember: (orgId: string, memberId: string) => ipcRenderer.invoke('team:remove-member', orgId, memberId),
     updateMemberRole: (orgId: string, memberId: string, role: string) => ipcRenderer.invoke('team:update-role', orgId, memberId, role),
     listProjects: (orgId: string) => ipcRenderer.invoke('team:list-projects', orgId),
@@ -2078,8 +2144,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Git operations (real-time status events)
   git: {
     // Listen for git status changes (staging, unstaging, etc.)
-    onStatusChanged: (callback: (data: { workspacePath: string }) => void) => {
-      const handler = (_event: any, data: { workspacePath: string }) => callback(data);
+    // `revision`/`status` are present when main computed the snapshot itself
+    // (after a Git operation settled). The index and ref watchers still send the
+    // path-only shape, so both must stay handled.
+    onStatusChanged: (callback: (data: GitStatusChangedPayload) => void) => {
+      const handler = (_event: any, data: GitStatusChangedPayload) => callback(data);
       ipcRenderer.on('git:status-changed', handler);
       return () => ipcRenderer.removeListener('git:status-changed', handler);
     },

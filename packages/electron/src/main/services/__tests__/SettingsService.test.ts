@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -22,7 +23,9 @@ vi.mock('electron', () => {
       getPath: () => tmpDir,
       getName: () => 'nimbalyst-test',
       getVersion: () => '0.0.0-test',
+      isReady: () => true,
     },
+    safeStorage: { isEncryptionAvailable: () => true, getSelectedStorageBackend: () => 'gnome_libsecret', encryptString: (s: string) => Buffer.from(Buffer.from(s).toString('base64')), decryptString: (b: Buffer) => Buffer.from(b.toString(), 'base64').toString() },
     ipcMain: {
       on: () => {},
       handle: () => {},
@@ -54,6 +57,14 @@ const STORE_FALLBACK = path.join(
 );
 
 describe('SettingsService', () => {
+  it('keeps provider credentials out of JSON and generic snapshots', async () => {
+    const { getSettingsService } = await import('../SettingsService');
+    const svc = getSettingsService();
+    svc.set('ai.apiKey.openai', 'dummy-private-provider-key');
+    const file = path.join(tmpDir, 'ai-settings.json');
+    expect((fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '').includes('dummy-private-provider-key')).toBe(false);
+    expect(JSON.stringify(svc.getAll()).includes('dummy-private-provider-key')).toBe(false);
+  });
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'settings-service-'));
     vi.resetModules();
@@ -79,6 +90,40 @@ describe('SettingsService', () => {
     expect(svc.get('ai.provider.claude-code-cli')).toMatchObject({ enabled: false });
     // Codex (app server) is on by default.
     expect(svc.get('ai.provider.openai-codex')).toMatchObject({ enabled: true });
+  });
+
+  it.each([undefined, null, 'true', 1, {}, []].map(value => [value]))('keeps external following off for absent or malformed saved value %j', async (value) => {
+    const file = path.join(tmpDir, 'app-settings.json');
+    const legacy = { developerMode: true, releaseChannel: 'alpha', externalSessionFollowEnabled: value };
+    fs.writeFileSync(file, JSON.stringify(legacy));
+    const { getSettingsService } = await import('../SettingsService');
+    const svc = getSettingsService();
+    expect(svc.get('app.externalSessionFollowEnabled')).toBe(false);
+    expect(svc.getAll()['app.externalSessionFollowEnabled']).toBe(false);
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toEqual(JSON.parse(JSON.stringify(legacy)));
+  });
+
+  it('persists explicit external-follow opt-in and opt-out across service reloads', async () => {
+    const key = 'app.externalSessionFollowEnabled';
+    const { getSettingsService } = await import('../SettingsService');
+    const svc = getSettingsService();
+    expect(svc.get(key)).toBe(false);
+    const events: Array<{ key: string; value: unknown }> = [];
+    const unsubscribe = svc.subscribe((key, value) => events.push({ key, value }));
+    for (const invalid of ['true', 1, null, {}]) {
+      expect(() => svc.set(key, invalid as any)).toThrow(/schema validation failed/);
+    }
+    expect(events).toEqual([]);
+    svc.set(key, true);
+    expect(JSON.parse(fs.readFileSync(path.join(tmpDir, 'app-settings.json'), 'utf8')).externalSessionFollowEnabled).toBe(true);
+    expect(events).toEqual([{ key, value: true }]);
+    unsubscribe();
+    vi.resetModules();
+    const reloaded = (await import('../SettingsService')).getSettingsService();
+    expect(reloaded.get(key)).toBe(true);
+    reloaded.set(key, false);
+    vi.resetModules();
+    expect((await import('../SettingsService')).getSettingsService().get(key)).toBe(false);
   });
 
   it('persists a claude-code-cli hidden-model denylist round-trip', async () => {
@@ -199,7 +244,7 @@ describe('SettingsService', () => {
 
     expect(events).toEqual([
       { key: 'ai.showToolCalls', value: true },
-      { key: 'ai.apiKey.openai', value: 'sk-test' },
+      { key: 'ai.apiKey.openai', value: '••••••••' },
     ]);
 
     unsub();
@@ -249,7 +294,7 @@ describe('SettingsService', () => {
     expect(isSettingKey('ai.apiKey.opencode')).toBe(true);
     expect(svc.get('ai.apiKey.opencode')).toBe('');
     svc.set('ai.apiKey.opencode', 'sk-opencode-test');
-    expect(svc.get('ai.apiKey.opencode')).toBe('sk-opencode-test');
+    expect(svc.get('ai.apiKey.opencode')).toBe('••••••••');
   });
 
   it('round-trips an extension-contributed agent provider key (NIM-1581 / #803)', async () => {
@@ -268,8 +313,15 @@ describe('SettingsService', () => {
 
     // Stored under the same providerSettings.<id> shape as built-in providers so
     // the legacy AIService reads keep working.
-    const onDisk = JSON.parse(fs.readFileSync(STORE_FALLBACK, 'utf8'));
+    const onDisk = JSON.parse(fs.readFileSync(path.join(tmpDir, 'ai-settings.json'), 'utf8'));
     expect(onDisk.providerSettings['antigravity-gemini-agent']).toMatchObject({ enabled: true });
+  });
+
+  it('rejects provider-config credential writes without echoing the secret', async () => {
+    const { getSettingsService } = await import('../SettingsService');
+    const svc = getSettingsService();
+    expect(() => svc.set('ai.provider.openai', {enabled: false, apiKey: 'dummy-config-secret'})).toThrow('dedicated API key control');
+    expect(JSON.stringify(svc.getAll()).includes('dummy-config-secret')).toBe(false);
   });
 
   it('preserves the existing on-disk shape (providerSettings.<id> path)', async () => {
@@ -281,8 +333,8 @@ describe('SettingsService', () => {
     // inside ai-settings.json so legacy AIService reads (which still go
     // through `getSettingsStore().get('providerSettings.<id>')`) keep working
     // unchanged during the migration.
-    expect(fs.existsSync(STORE_FALLBACK)).toBe(true);
-    const onDisk = JSON.parse(fs.readFileSync(STORE_FALLBACK, 'utf8'));
+    expect(fs.existsSync(path.join(tmpDir, 'ai-settings.json'))).toBe(true);
+    const onDisk = JSON.parse(fs.readFileSync(path.join(tmpDir, 'ai-settings.json'), 'utf8'));
     expect(onDisk.providerSettings.claude).toMatchObject({ enabled: true });
   });
 });

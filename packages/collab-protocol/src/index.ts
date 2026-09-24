@@ -13,6 +13,7 @@ export * from "./comments.js";
 export * from "./structuredInput.js";
 export * from "./feedbackRequest.js";
 export * from "./feedbackRequestRoom.js";
+export * from "./decisionBlock.js";
 export * from "./conversation.js";
 export * from "./conversationRoom.js";
 export * from "./teamInbox.js";
@@ -22,3 +23,12 @@ export * from "./teamDocumentHistory.js";
 export * from "./teamTracker.js";
 export * from "./teamRoom.js";
 export * from "./projectSync.js";
+
+export * from "./documentDecision.js";
+
+export * from "./documentFeedbackIndex.js";
+
+export * from "./indexReplication.js";
+export * from "./sessionRetention.js";
+export * from './jwtScopes.js';
+export * from './syncClientInfo.js';

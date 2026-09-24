@@ -127,6 +127,16 @@ export const SETTINGS_REGISTRY = {
     { store: 'ai-settings', path: 'providerSettings.copilot-cli' },
     { enabled: false, testStatus: 'idle', installStatus: 'not-installed' },
   ),
+  'ai.provider.grok-build': setting(
+    ProviderConfigSchema,
+    { store: 'ai-settings', path: 'providerSettings.grok-build' },
+    { enabled: false, testStatus: 'idle', installStatus: 'not-installed' },
+  ),
+  'ai.provider.cursor-agent': setting(
+    ProviderConfigSchema,
+    { store: 'ai-settings', path: 'providerSettings.cursor-agent' },
+    { enabled: false, testStatus: 'idle', installStatus: 'not-installed' },
+  ),
   'ai.provider.lmstudio': setting(
     ProviderConfigSchema,
     { store: 'ai-settings', path: 'providerSettings.lmstudio' },
@@ -236,6 +246,12 @@ export const SETTINGS_REGISTRY = {
     z.boolean(),
     { store: 'ai-settings', path: 'showGeminiUsageIndicator' },
     true,
+  ),
+  // Explicit opt-in, independent of developer mode and feature enable-all.
+  'app.externalSessionFollowEnabled': setting(
+    z.boolean(),
+    { store: 'app-settings', path: 'externalSessionFollowEnabled' },
+    false,
   ),
   /** Width (px) of the gutter's agent sessions attention popover. */
   'agent.sessionsPopoverWidth': setting(

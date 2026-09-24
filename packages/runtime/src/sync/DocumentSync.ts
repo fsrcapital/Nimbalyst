@@ -1,16 +1,21 @@
 /**
  * DocumentSyncProvider
  *
- * Client-side Yjs document sync with E2E encryption over WebSocket.
- * Connects to a DocumentRoom Durable Object, sends/receives encrypted
- * Yjs updates, and manages awareness state.
+ * Client-side Yjs document sync over WebSocket. Connects to a DocumentRoom
+ * Durable Object, sends/receives Yjs updates, and manages awareness state.
+ *
+ * Custody is server-managed: team documents are PLAINTEXT over TLS, the
+ * server holds the team DEK and encrypts at rest, and the client holds no
+ * team key. `encodeForWire` is a base64 pass-through. The wire field is
+ * still named `encrypted` and the local replica on disk IS genuinely
+ * encrypted -- wire and at-rest are different axes. Before changing
+ * anything named `encrypt*` here, read the lane table in
+ * docs/IDENTITY_AUTH_AND_ROOMS.md section 6.
  *
  * The provider:
  * - Attaches to a LocalDocumentReplica/Y.Doc (or creates one for back-compat)
- * - Encrypts all outgoing Yjs updates with AES-256-GCM
- * - Decrypts incoming updates and applies them to the Y.Doc
+ * - Encodes outgoing Yjs updates for the wire and applies inbound ones
  * - Handles sync (initial load), realtime broadcasts, and awareness
- * - Never sends plaintext data over the wire
  *
  * Remote updates merge and land like any other CRDT update -- a shared room is
  * shared, so there is no per-collaborator accept/reject step. Recovering an
@@ -19,6 +24,8 @@
  */
 
 import * as Y from 'yjs';
+import { DocumentDecisionClient } from './DocumentDecisionClient';
+import type { DocumentDecisionCommand, DocumentDecisionDeliveryState, DocumentDecisionAuthority, DocumentDecisionResult } from '@nimbalyst/collab-protocol';
 import type {
   DocumentSyncConfig,
   DocumentSyncMemberId,
@@ -32,7 +39,7 @@ import type {
   DocUpdateAckMessage,
 } from './documentSyncTypes';
 import { documentSyncMemberId } from './documentSyncTypes';
-import { appendSyncClientParams } from './syncClientInfo';
+import { appendSyncClientParams, redactSyncUrl } from './syncClientInfo';
 import { encodeDocumentRoomId, isValidCollabDocumentId } from './collabDocumentId';
 import { isConfirmedOutboxRevocationCode } from './OutboxDrainer';
 import {
@@ -45,29 +52,7 @@ import {
 // Base64 / Encryption Utilities
 // ============================================================================
 
-const CHUNK_SIZE = 8192;
-
-function uint8ArrayToBase64(bytes: Uint8Array): string {
-  if (bytes.length < 1024) {
-    return btoa(String.fromCharCode(...bytes));
-  }
-  let result = '';
-  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-    const chunk = bytes.subarray(i, Math.min(i + CHUNK_SIZE, bytes.length));
-    result += String.fromCharCode(...chunk);
-  }
-  return btoa(result);
-}
-
-function base64ToUint8Array(base64: string): Uint8Array {
-  const binary = atob(base64);
-  const buffer = new ArrayBuffer(binary.length);
-  const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
+import { uint8ArrayToBase64, base64ToUint8Array } from './documentSyncBase64';
 
 // ============================================================================
 // DocumentSyncProvider
@@ -91,7 +76,7 @@ const AWARENESS_STALE_TIMEOUT_MS = 30_000;
 /**
  * Compaction thresholds.
  *
- * The server stores every encrypted Yjs update forever unless a client sends
+ * The server stores every Yjs update forever unless a client sends
  * `docCompact`. Without compaction, initial sync downloads the full update
  * history every time, so heavy docs (and any non-markdown collab doc that
  * generates many small ops, e.g. Excalidraw drags) become slow to open.
@@ -212,7 +197,7 @@ export class DocumentSyncProvider {
    * `lib0/function.callAll`, which runs every listener and rethrows at the end,
    * so the CRDT already holds the full update. Vetoing compaction there would
    * degrade a whole room's sync on the strength of a client-side rendering bug.
-   * See `applyDecryptedUpdate` for how the two are told apart.
+   * See `applyDecodedUpdate` for how the two are told apart.
    */
   private skippedUndecodablePayload = false;
   private lastCompactionAttemptAt = 0;
@@ -368,7 +353,7 @@ export class DocumentSyncProvider {
       return;
     }
 
-    console.log('[DocumentSync] Connecting to:', url.replace(/token=[^&]+/, 'token=<redacted>'));
+    console.log('[DocumentSync] Connecting to:', redactSyncUrl(url));
     const ws = this.config.createWebSocket
       ? this.config.createWebSocket(url)
       : new WebSocket(url);
@@ -437,6 +422,7 @@ export class DocumentSyncProvider {
    * Disconnect from the DocumentRoom.
    */
   disconnect(): void {
+    this.decisionClient.disconnect();
     if (COLLAB_CONNECTION_DIAGNOSTICS_COMPILED) {
       emitCollabConnectionEvent(this, 'DocumentSyncProvider', 'disconnect', {
         hadSocket: Boolean(this.ws),
@@ -586,6 +572,9 @@ export class DocumentSyncProvider {
     });
   }
 
+  /** Synchronous close guard; only a server acknowledgement clears unsettled writes. */
+  hasPendingWrites(): boolean { return this.hasUnsettledPendingWrites() || this.decisionClient.hasPendingMutations(); }
+
   /**
    * Set room-level metadata on the server (e.g., custom TTL).
    * Only allowlisted keys are accepted server-side.
@@ -595,16 +584,16 @@ export class DocumentSyncProvider {
   }
 
   /**
-   * Encrypt bytes for the wire: pass-through (base64 raw bytes, empty-string iv
+   * Encode bytes for the wire: pass-through (base64 raw bytes, empty-string iv
    * sentinel). The server encrypts at rest with the team DEK; the client holds
    * no team key.
    */
-  private async encryptForWire(data: Uint8Array): Promise<{ encrypted: string; iv: string }> {
+  private async encodeForWire(data: Uint8Array): Promise<{ encrypted: string; iv: string }> {
     return { encrypted: uint8ArrayToBase64(data), iv: '' };
   }
 
   /**
-   * Decrypt bytes from the wire.
+   * Decode bytes from the wire.
    *
    * The server decrypts rows it owns and sends them as PLAINTEXT with the
    * empty-iv sentinel (''). A NON-EMPTY iv means the row is pre-cutover
@@ -612,7 +601,7 @@ export class DocumentSyncProvider {
    * the key for it, so throw rather than hand Yjs bytes that decode to garbage.
    * The per-payload catch skips just that row instead of blanking the document.
    */
-  private async decryptFromWire(encrypted: string, iv: string): Promise<Uint8Array> {
+  private async decodeFromWire(encrypted: string, iv: string): Promise<Uint8Array> {
     if (iv) {
       throw new Error(
         'Document row is pre-cutover client-encrypted content and can no longer be read',
@@ -646,7 +635,7 @@ export class DocumentSyncProvider {
    * Synchronously put an additive departure marker on the open socket.
    *
    * This deliberately bypasses both the 500ms awareness throttle and the
-   * async encryptForWire seam: awareness is already plaintext-over-TLS with
+   * async encodeForWire seam: awareness is already plaintext-over-TLS with
    * an empty IV. Teardown can therefore send this frame before closing the
    * socket, including from pagehide where awaiting is unreliable.
    */
@@ -784,6 +773,15 @@ export class DocumentSyncProvider {
   // Sync Protocol
   // --------------------------------------------------------------------------
 
+  private readonly decisionClient = new DocumentDecisionClient(
+    (message) => this.send(message), () => this.isSynced(), () => this.flushWithAck(8000),
+  );
+  requestDecision(command: DocumentDecisionCommand): Promise<DocumentDecisionResult> {
+    return this.decisionClient.request(command);
+  }
+  getDecisionState = (): DocumentDecisionDeliveryState[] => this.decisionClient.getState();
+  onDecisionState = (listener: (state: DocumentDecisionDeliveryState[], authority: DocumentDecisionAuthority) => void): (() => void) => this.decisionClient.subscribe(listener);
+
   private requestSync(): void {
     this.lastSyncRequestSeq = this.lastSeq;
     this.send({ type: 'docSyncRequest', sinceSeq: this.lastSeq });
@@ -798,8 +796,15 @@ export class DocumentSyncProvider {
       const msg: DocServerMessage = JSON.parse(data);
 
       switch (msg.type) {
+        case 'docDecisionChanged':
+          this.decisionClient.invalidate();
+          break;
+        case 'docDecisionState':
+          this.decisionClient.receive(msg);
+          break;
         case 'docSyncResponse':
           await this.handleSyncResponse(msg);
+          if (!msg.hasMore) this.decisionClient.refreshSubscribers();
           break;
         case 'docUpdateBroadcast':
           await this.handleUpdateBroadcast(msg);
@@ -857,7 +862,7 @@ export class DocumentSyncProvider {
    * `readUpdate` completed, before any observer has run. `local: false` matches
    * what `applyUpdate` sets on the transaction itself.
    */
-  private applyDecryptedUpdate(
+  private applyDecodedUpdate(
     bytes: Uint8Array,
     origin: string,
   ): { ok: true } | { ok: false; integrated: boolean; error: unknown } {
@@ -931,7 +936,7 @@ export class DocumentSyncProvider {
     if (msg.snapshot) {
       let stateBytes: Uint8Array | null = null;
       try {
-        stateBytes = await this.decryptFromWire(
+        stateBytes = await this.decodeFromWire(
           msg.snapshot.encryptedState,
           msg.snapshot.iv,
         );
@@ -956,7 +961,7 @@ export class DocumentSyncProvider {
             serverSequence: null,
           });
         } else {
-          const outcome = this.applyDecryptedUpdate(stateBytes, SNAPSHOT_ORIGIN);
+          const outcome = this.applyDecodedUpdate(stateBytes, SNAPSHOT_ORIGIN);
           if (!outcome.ok && !outcome.integrated) {
             // Decrypted fine but the bytes are not valid Yjs -- same standing
             // as an undecodable row: content we hold only partially and can
@@ -981,7 +986,7 @@ export class DocumentSyncProvider {
     for (const update of msg.updates) {
       let updateBytes: Uint8Array | null = null;
       try {
-        updateBytes = await this.decryptFromWire(
+        updateBytes = await this.decodeFromWire(
           update.encryptedUpdate,
           update.iv,
         );
@@ -1001,7 +1006,7 @@ export class DocumentSyncProvider {
             serverSequence: update.sequence,
           });
         } else {
-          const outcome = this.applyDecryptedUpdate(updateBytes, REMOTE_ORIGIN);
+          const outcome = this.applyDecodedUpdate(updateBytes, REMOTE_ORIGIN);
           if (!outcome.ok && !outcome.integrated) {
             console.warn(`[DocumentSync] Skipping update at seq ${update.sequence} that decrypted but could not be integrated:`, DocumentSyncProvider.logDetail(outcome.error));
             this.skippedUndecodablePayload = true;
@@ -1107,12 +1112,12 @@ export class DocumentSyncProvider {
     // missing left no trace at all: both logged failure branches below can be
     // negative on a receiving machine while the update still never paints.
     // `ivLength` is recorded because a non-empty iv is the single bit
-    // `decryptFromWire` uses to reject a row as pre-cutover.
+    // `decodeFromWire` uses to reject a row as pre-cutover.
     if (COLLAB_CONNECTION_DIAGNOSTICS_COMPILED) {
       emitCollabConnectionEvent(this, 'DocumentSyncProvider', 'inbound-broadcast', {
         sequence: msg.sequence,
         ivLength: msg.iv?.length ?? 0,
-        encryptedLength: msg.encryptedUpdate?.length ?? 0,
+        wireLength: msg.encryptedUpdate?.length ?? 0,
         viaReplica: Boolean(this.config.replica),
       });
     }
@@ -1120,7 +1125,7 @@ export class DocumentSyncProvider {
       ? Y.encodeStateVector(this.ydoc)
       : null;
     try {
-      updateBytes = await this.decryptFromWire(
+      updateBytes = await this.decodeFromWire(
         msg.encryptedUpdate,
         msg.iv,
       );
@@ -1138,7 +1143,7 @@ export class DocumentSyncProvider {
           return;
         }
       } else {
-        const outcome = this.applyDecryptedUpdate(updateBytes, REMOTE_ORIGIN);
+        const outcome = this.applyDecodedUpdate(updateBytes, REMOTE_ORIGIN);
         if (!outcome.ok && !outcome.integrated) {
           // Decrypted, but the bytes are not valid Yjs -- rethrow into the skip
           // handler below so the "one bad row" path is unchanged. See NIM-878.
@@ -1160,7 +1165,7 @@ export class DocumentSyncProvider {
         const stateAfter = Y.encodeStateVector(this.ydoc);
         emitCollabConnectionEvent(this, 'DocumentSyncProvider', 'inbound-applied', {
           sequence: msg.sequence,
-          decryptedBytes: updateBytes.length,
+          decodedBytes: updateBytes.length,
           docChanged: stateBefore.length !== stateAfter.length
             || stateAfter.some((byte, index) => byte !== stateBefore[index]),
         });
@@ -1202,7 +1207,7 @@ export class DocumentSyncProvider {
     if (msg.fromUserId === this.memberId) return;
 
     try {
-      const stateBytes = await this.decryptFromWire(
+      const stateBytes = await this.decodeFromWire(
         msg.encryptedState,
         msg.iv,
       );
@@ -1227,7 +1232,7 @@ export class DocumentSyncProvider {
   // --------------------------------------------------------------------------
 
   /**
-   * Watch the Y.Doc for local updates and send them encrypted to the server.
+   * Watch the Y.Doc for local updates and send them to the server.
    */
   private setupUpdateObserver(): void {
     if (this.updateObserverDispose) return;
@@ -1401,7 +1406,7 @@ export class DocumentSyncProvider {
       this.replayingReplicaOutboxIds = durableBatch ? durableBatch.batchIds : [];
       this.replayStartedAt ??= Date.now();
       this.replayAttemptCount += 1;
-      const { encrypted, iv } = await this.encryptForWire(updateToSend);
+      const { encrypted, iv } = await this.encodeForWire(updateToSend);
       if (this.surfaceReplayStatus) {
         this.setStatus('replaying');
       } else {
@@ -1566,6 +1571,7 @@ export class DocumentSyncProvider {
   }
 
   private handleDisconnect(): void {
+    this.decisionClient.disconnect();
     const shouldReconnect = !this.suppressReconnect;
     if (COLLAB_CONNECTION_DIAGNOSTICS_COMPILED) {
       emitCollabConnectionEvent(this, 'DocumentSyncProvider', 'socket-detach', {
@@ -1922,7 +1928,7 @@ export class DocumentSyncProvider {
     }
 
     try {
-      const { encrypted, iv } = await this.encryptForWire(stateBytes);
+      const { encrypted, iv } = await this.encodeForWire(stateBytes);
       const clientCompactId = `compact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       this.send({
         type: 'docCompact',
@@ -2002,7 +2008,7 @@ export class DocumentSyncProvider {
       throw new Error('Refusing to force-replace the room with an empty document');
     }
 
-    const { encrypted, iv } = await this.encryptForWire(stateBytes);
+    const { encrypted, iv } = await this.encodeForWire(stateBytes);
     const clientCompactId = `${options.operation}-${this.lastSeq}-${this.memberId}-${this.forceReplaceCounter++}`;
 
     const acked = new Promise<boolean>((resolve) => {

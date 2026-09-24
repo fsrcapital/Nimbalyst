@@ -1,11 +1,17 @@
-import { act } from '@testing-library/react';
+import React from 'react';
+import { act, fireEvent, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as Y from 'yjs';
 
 import { asTeamJwt, asTeamMemberId } from '@nimbalyst/runtime/auth/jwtScopes';
 import { collabCommentControllerRegistry } from '@nimbalyst/runtime/editor/commenting/CollabCommentControllerRegistry';
+import { withHeadlessLexicalBridge } from '@nimbalyst/runtime/sync/withHeadlessLexicalBridge';
+import { HeadlessBodyNodes } from '@nimbalyst/runtime/editor/nodes/headlessBodyNodes';
+import { $getRoot } from 'lexical';
+import { uint8ArrayToBase64, base64ToUint8Array } from '@nimbalyst/runtime/sync/documentSyncBase64';
+import { $createEmbeddedFileNode } from '@nimbalyst/runtime/editor/plugins/EmbedPlugin/EmbeddedFileNode';
 import { MarkdownCollabContentAdapter } from '@nimbalyst/runtime/sync/MarkdownCollabContentAdapter';
-import { mountCollabEditor } from '../mount';
+import { decisionMembersFromComments, mountCollabEditor } from '../mount';
 import { CollabPresenceSurface } from '../presence';
 import {
   asTeamDocumentId,
@@ -31,6 +37,54 @@ afterEach(() => {
 });
 
 describe('in-memory collaborative editor harness', () => {
+  it('renders persisted subject embeds through each mount’s authorized preview without crossing scopes', async () => {
+    const mounts = ['one', 'two'].map((scope) => {
+      const yDocument = new Y.Doc();
+      withHeadlessLexicalBridge(yDocument, { nodes: HeadlessBodyNodes }, ({ editor }) => {
+        editor.update(() => $getRoot().append($createEmbeddedFileNode({
+          src: `nimbalyst://doc/preview-${scope}?orgId=org-${scope}`,
+          label: `Preview ${scope}`, attrs: { embedType: '.mockup.html' },
+        })), { discrete: true });
+      });
+      const element = document.createElement('div'); document.body.append(element);
+      const render = vi.fn((_key: string, artifact: string) => <div data-testid="live-subject-preview">{scope}: {artifact}</div>);
+      const handle = mountCollabEditor({ element, source: { kind: 'in-memory', document: yDocument }, user: { memberId: asTeamMemberId(scope), name: scope }, renderDecisionArtifact: render });
+      mountedHandles.push(handle);
+      return { element, handle, render, scope };
+    });
+    await settle();
+    for (const { element, scope } of mounts) {
+      await waitFor(() => expect(element.querySelector('[data-testid="live-subject-preview"]')?.textContent).toBe(`${scope}: collab://org:org-${scope}:doc:preview-${scope}`));
+      expect(element.querySelector('[data-testid="embed-frame-placeholder"]')).toBeNull();
+    }
+    await act(async () => mounts[0]!.handle.destroy());
+    await act(async () => mounts[1]!.handle.setReadOnly(true));
+    await settle();
+    expect(mounts[1]!.element.querySelector('[data-testid="live-subject-preview"]')?.textContent).toContain('two: collab://org:org-two:doc:preview-two');
+    expect(mounts[0]!.render.mock.calls.every(([, artifact]) => artifact.includes('org-one'))).toBe(true);
+    expect(mounts[1]!.render.mock.calls.every(([, artifact]) => artifact.includes('org-two'))).toBe(true);
+  });
+
+  it.each([
+    { src: '/private/preview.mockup.html', capable: true },
+    { src: 'nimbalyst://doc/preview?orgId=org-one', capable: false },
+  ])('keeps embedded subjects unavailable without a shared target and host capability: $src', async ({ src, capable }) => {
+    const yDocument = new Y.Doc();
+    withHeadlessLexicalBridge(yDocument, { nodes: HeadlessBodyNodes }, ({ editor }) => editor.update(() => {
+      $getRoot().append($createEmbeddedFileNode({ src, label: 'Preview', attrs: { embedType: '.mockup.html' } }));
+    }, { discrete: true }));
+    const element = document.createElement('div'); document.body.append(element);
+    const render = vi.fn(() => <div>Must not render</div>);
+    const handle = mountCollabEditor({ element, source: { kind: 'in-memory', document: yDocument }, user: { memberId: asTeamMemberId('member'), name: 'Member' }, ...(capable ? { renderDecisionArtifact: render } : {}) });
+    mountedHandles.push(handle);
+    await settle();
+    await waitFor(() => expect(element.querySelector('.collab-bundle-document-embed-unavailable')).not.toBeNull());
+    expect(render).not.toHaveBeenCalled();
+  });
+
+  it('uses the roster team member id rather than personal org identity for decision addressing', () => {
+    expect(decisionMembersFromComments([{ userId: 'member-in-team', personalOrgId: 'personal-org', name: 'Alex' }])).toEqual([{ id: 'member-in-team', name: 'Alex' }]);
+  });
   it('paints a pre-populated Y.Doc through the provider bridge and accepts input', async () => {
     const yDocument = new Y.Doc();
     MarkdownCollabContentAdapter.seedFromFile(yDocument, '# Bundle harness\n\nPREPOPULATED-MARKER');
@@ -71,6 +125,34 @@ describe('in-memory collaborative editor harness', () => {
       status: 'not-required',
       reason: 'in-memory',
     });
+  });
+
+  it('records browser decision votes in the shared document using the team member identity', async () => {
+    const yDocument = new Y.Doc();
+    MarkdownCollabContentAdapter.seedFromFile(yDocument, '```decision\nid: browser-q\nask: Ship this?\ntype: singleSelect\noptions:\n  - id: yes\n    label: Ship it\n  - id: no\n    label: Wait\n```');
+    const element = document.createElement('div'); document.body.append(element);
+    // Shared ballots stay disabled until a privacy-aware server authorizes the
+    // list. A transport-free in-memory mount cannot supply that authority.
+    const socket = new FakeRoomSocket();
+    socket.decisionDocument = yDocument;
+    const handle = mountCollabEditor({
+      element,
+      source: {
+        kind: 'team-room', serverUrl: 'ws://collab.test',
+        room: { orgId: asTeamOrgId('org-votes'), projectId: asTeamProjectId('project-votes'), documentId: asTeamDocumentId('doc-votes') },
+        auth: { scope: 'team', memberId: asTeamMemberId('team-reader'), getTeamJwt: async () => asTeamJwt('team-jwt') },
+        createWebSocket: () => socket as unknown as WebSocket,
+      },
+      user: { memberId: asTeamMemberId('team-reader'), name: 'Reader' },
+    });
+    mountedHandles.push(handle);
+    await settle();
+    await act(async () => { socket.open(); socket.deliverSyncResponse(true); });
+    await waitFor(() => expect(element.querySelector('button[data-testid="decision-option-row"]')).not.toBeNull());
+    const option = [...element.querySelectorAll('button')].find((button) => button.textContent?.includes('Ship it'))!;
+    fireEvent.click(option);
+    fireEvent.click(element.querySelector('[data-testid="decision-answer"]')!);
+    await waitFor(() => expect(yDocument.getMap('decisions').get('browser-q\x1fteam-reader')).toMatchObject({ answer: { type: 'singleSelect', selectedId: 'yes' } }));
   });
 
   it('paints tracker and shared-document references written by a desktop client', async () => {
@@ -199,7 +281,19 @@ class FakeRoomSocket {
     this.listeners.get(type)?.delete(listener);
   }
 
-  send(): void {}
+  decisionDocument?: Y.Doc;
+
+  send(data: string): void {
+    if (!this.decisionDocument) return;
+    const message = JSON.parse(data);
+    if (message.type === 'docDecisionCommand' && message.command.operation === 'list') {
+      queueMicrotask(() => this.emit('message', { data: JSON.stringify({ type: 'docDecisionState', requestId: message.requestId, decisions: [], privacyVersion: 1 }) }));
+    }
+    if (message.type === 'docUpdate') {
+      Y.applyUpdate(this.decisionDocument, base64ToUint8Array(message.encryptedUpdate));
+      queueMicrotask(() => this.emit('message', { data: JSON.stringify({ type: 'docUpdateAck', clientUpdateId: message.clientUpdateId }) }));
+    }
+  }
 
   close(): void {
     this.readyState = 3;
@@ -210,16 +304,38 @@ class FakeRoomSocket {
     this.emit('open', {});
   }
 
-  /** The server's answer to `docSyncRequest`: a document, and no write verdict. */
-  deliverSyncResponse(): void {
+  /**
+   * The server's answer to `docSyncRequest`. `canWrite` is omitted to stand in
+   * for a server that predates the verdict, which is how the client's fallback
+   * to its own host answer stays covered.
+   */
+  deliverSyncResponse(canWrite?: boolean): void {
     this.emit('message', {
       data: JSON.stringify({
         type: 'docSyncResponse',
-        updates: [],
+        updates: this.decisionDocument ? [{ sequence: 1, encryptedUpdate: uint8ArrayToBase64(Y.encodeStateAsUpdate(this.decisionDocument)), iv: '' }] : [],
         hasMore: false,
         cursor: 0,
         serverHead: 0,
         serverHasState: true,
+        ...(canWrite === undefined ? {} : { canWrite }),
+      }),
+    });
+  }
+
+  deliverWriteAcknowledged(): void {
+    this.emit('message', {
+      data: JSON.stringify({ type: 'docUpdateAck', clientUpdateId: 'probe-access' }),
+    });
+  }
+
+  /** The server refusing a write, which is how a stale host answer is corrected. */
+  deliverReadOnlyRefusal(): void {
+    this.emit('message', {
+      data: JSON.stringify({
+        type: 'error',
+        code: 'document_read_only',
+        message: 'Your current role permits reading this document but not editing it',
       }),
     });
   }
@@ -233,6 +349,7 @@ describe('comment authoring on a document that has not been written to', () => {
   async function openTeamDocument(
     documentId: string,
     canComment: () => boolean,
+    serverCanWrite?: boolean,
   ): Promise<{ handle: CollabEditorHandle; documentUri: string }> {
     FakeRoomSocket.opened.length = 0;
     const element = document.createElement('div');
@@ -273,7 +390,7 @@ describe('comment authoring on a document that has not been written to', () => {
     if (!socket) throw new Error('the editor never opened a room socket');
     await act(async () => {
       socket.open();
-      socket.deliverSyncResponse();
+      socket.deliverSyncResponse(serverCanWrite);
     });
     await settle();
     return { handle, documentUri };
@@ -285,23 +402,80 @@ describe('comment authoring on a document that has not been written to', () => {
     return controller.getCapabilities().comment;
   }
 
-  it('offers authoring to a writer and withholds it from a viewer', async () => {
-    // The bug this covers: comment capability was derived from `serverAccess`
-    // alone, which only reaches `writable` after the server acknowledges a
-    // write. Opening a document performs no write, so every writer sat at
-    // `unknown` and commenting was unreachable for the whole session.
+  function commentController(documentUri: string) {
+    const controller = collabCommentControllerRegistry.get(documentUri);
+    if (!controller) throw new Error('the comment plugin never registered a controller');
+    return controller;
+  }
+
+  it('lets a permitted host author on a document it has never written to', async () => {
+    // The server only ever acknowledges a write it was asked to make, so a
+    // document opened to be annotated stays at 'unknown' for its whole session.
+    // Authoring has to be available there or the comment panel is unusable.
     const writer = await openTeamDocument('doc-writer', () => true);
     expect(writer.handle.getState()).toMatchObject({
       connection: 'connected',
       serverAccess: 'unknown',
     });
     expect(commentCapability(writer.documentUri)).toBe(true);
+    // Reaching anchor resolution at all is the point: this attempt used to be
+    // turned away as COMMENT_FORBIDDEN before the anchor was ever looked at.
+    await expect(commentController(writer.documentUri).createAnchored({
+      anchor: { exact: 'not present' },
+      body: 'Authored before any edit',
+      clientMutationId: 'unknown-access-attempt',
+    }, {
+      kind: 'user',
+      userId: 'member-reader',
+      displayName: 'Reader',
+    })).rejects.toMatchObject({ code: 'ANCHOR_NOT_FOUND' });
+  });
 
+  it('takes the sync response write verdict without waiting for a write', async () => {
+    // A server that reports access on connect settles this before the user
+    // touches anything, so a downgraded member is never offered an affordance
+    // that would bounce.
+    const writer = await openTeamDocument('doc-verdict-writer', () => true, true);
+    expect(writer.handle.getState()).toMatchObject({
+      serverAccess: 'writable',
+      readOnly: false,
+    });
+    expect(commentCapability(writer.documentUri)).toBe(true);
+
+    const downgraded = await openTeamDocument('doc-verdict-reader', () => true, false);
+    expect(downgraded.handle.getState()).toMatchObject({
+      serverAccess: 'read-only',
+      readOnly: true,
+    });
+    expect(commentCapability(downgraded.documentUri)).toBe(false);
+  });
+
+  it('refuses a host that says no, and withdraws on a server write refusal', async () => {
     const viewer = await openTeamDocument('doc-viewer', () => false);
     expect(viewer.handle.getState()).toMatchObject({
       connection: 'connected',
       serverAccess: 'unknown',
     });
     expect(commentCapability(viewer.documentUri)).toBe(false);
+    await expect(commentController(viewer.documentUri).createAnchored({
+      anchor: { exact: 'not present' },
+      body: 'Must not be written locally',
+      clientMutationId: 'viewer-attempt',
+    }, {
+      kind: 'user',
+      userId: 'member-reader',
+      displayName: 'Reader',
+    })).rejects.toMatchObject({ code: 'COMMENT_FORBIDDEN' });
+    expect(viewer.handle.getDocument().getArray('comments')).toHaveLength(0);
+
+    // A host answer that has gone stale is corrected by the server's refusal
+    // rather than by withholding the affordance up front.
+    const stale = await openTeamDocument('doc-downgraded', () => true);
+    expect(commentCapability(stale.documentUri)).toBe(true);
+    const staleSocket = FakeRoomSocket.opened[0];
+    if (!staleSocket) throw new Error('the downgraded member never opened a room socket');
+    await act(async () => staleSocket.deliverReadOnlyRefusal());
+    expect(stale.handle.getState()).toMatchObject({ serverAccess: 'read-only' });
+    expect(commentCapability(stale.documentUri)).toBe(false);
   });
 });

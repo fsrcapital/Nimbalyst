@@ -1,3 +1,4 @@
+import { warnIfUnpublished } from '@nimbalyst/runtime/sync/pushOutcome';
 /**
  * Persist the per-session "interactive prompt is open" bit to
  * `ai_sessions.metadata.hasPendingPrompt` and push the same change to
@@ -19,11 +20,13 @@
  * menu bar panel. Notify here and there is nothing left to forget.
  */
 
-import { AISessionsRepository } from '@nimbalyst/runtime';
+import { AISessionsRepository } from '@nimbalyst/runtime/storage/repositories/AISessionsRepository';
+import type { SessionChange } from '@nimbalyst/runtime/sync/types';
 import { getSyncProvider } from '../SyncManager';
 import { requestMobilePush } from './mobilePushRequest';
 import { notifyWebPushWaiting } from '../WebPushNotificationService';
 import { TrayManager } from '../../tray/TrayManager';
+import type { PromptKind } from '../../tray/fleetSnapshot';
 import { logger } from '../../utils/logger';
 
 /**
@@ -48,9 +51,18 @@ export function resetPendingPromptTracking(): void {
   sessionsWithPendingPrompt.clear();
 }
 
+/**
+ * `kind` is what the prompt is asking for: `approval` for a tool permission or
+ * commit proposal (a tap), `decision` for a question, a plan, or a structured
+ * input (thinking required). The menu bar strip colours its dot by it -- a
+ * session title does not tell you whether responding costs three seconds or ten
+ * minutes, and this does. Every callsite knows which it is opening; the default
+ * exists only for the clear path, where it is unused.
+ */
 export async function setSessionPendingPrompt(
   sessionId: string,
   hasPendingPrompt: boolean,
+  kind: PromptKind = 'approval',
 ): Promise<void> {
   if (!sessionId) return;
 
@@ -61,7 +73,7 @@ export async function setSessionPendingPrompt(
   // Before the awaits: the tray is in-memory, so a slow or failed row update
   // must not leave the menu bar showing a blocked session as merely running.
   if (hasPendingPrompt) {
-    TrayManager.getInstance().onPromptCreated(sessionId);
+    TrayManager.getInstance().onPromptCreated(sessionId, kind);
   } else {
     TrayManager.getInstance().onPromptResolved(sessionId);
   }
@@ -85,10 +97,12 @@ export async function setSessionPendingPrompt(
   try {
     const sp = getSyncProvider();
     if (sp) {
-      sp.pushChange(sessionId, {
+      const metadata: Extract<SessionChange, { type: 'metadata_updated' }>['metadata'] = { hasPendingPrompt, updatedAt: Date.now() };
+      const outcome = await sp.pushChange(sessionId, {
         type: 'metadata_updated',
-        metadata: { hasPendingPrompt, updatedAt: Date.now() } as any,
+        metadata,
       });
+      warnIfUnpublished(message => logger.main.warn(message), sessionId, '[pendingPromptPersistence] Failed to publish pending prompt', outcome);
     }
   } catch (err) {
     logger.main.warn(

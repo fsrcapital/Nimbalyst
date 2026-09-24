@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import type { LexicalEditor } from 'lexical';
 import { $getRoot, $getNodeByKey, $isTextNode, $createRangeSelection, $setSelection } from 'lexical';
-import { SearchReplaceStateManager } from './SearchReplaceStateManager';
+import { SearchReplaceStateManager, type SearchNavigateDirection } from './SearchReplaceStateManager';
 import { resolveMatchRange } from './resolveMatchRange';
 // Only contains global highlight styles for dynamically applied classes
 import './SearchReplaceBar.css';
@@ -179,6 +179,7 @@ export function SearchReplaceBar({ filePath, editor }: SearchReplaceBarProps) {
   const tabId = filePath;
 
   const [isOpen, setIsOpen] = useState(false);
+  const [focusNonce, setFocusNonce] = useState(0);
   const [searchString, setSearchString] = useState('');
   const [replaceString, setReplaceString] = useState('');
   const [caseInsensitive, setCaseInsensitive] = useState(true); // Case insensitive by default (Match case button OFF)
@@ -195,6 +196,7 @@ export function SearchReplaceBar({ filePath, editor }: SearchReplaceBarProps) {
     const handleStateChange = (changedTabId: string, state: any) => {
       if (changedTabId === tabId) {
         setIsOpen(state.isOpen);
+        setFocusNonce(state.focusNonce);
       }
     };
 
@@ -203,19 +205,23 @@ export function SearchReplaceBar({ filePath, editor }: SearchReplaceBarProps) {
     // Initialize state
     const initialState = SearchReplaceStateManager.getState(tabId);
     setIsOpen(initialState.isOpen);
+    setFocusNonce(initialState.focusNonce);
 
     return () => {
       SearchReplaceStateManager.removeListener(handleStateChange);
     };
   }, [tabId]);
 
-  // Focus search input when bar opens
+  // Focus the search input on every Find command, not just the one that opened
+  // the bar. Keying this on `isOpen` alone meant a Find issued while the bar was
+  // already open was a silent no-op, which is why Find had to close the bar to
+  // feel like it did anything -- and that dropped focus into the document (#1388).
   useEffect(() => {
     if (isOpen) {
       searchInputRef.current?.focus();
       searchInputRef.current?.select();
     }
-  }, [isOpen]);
+  }, [isOpen, focusNonce]);
 
   // Initialize and cleanup HighlightManager
   useEffect(() => {
@@ -455,6 +461,24 @@ export function SearchReplaceBar({ filePath, editor }: SearchReplaceBarProps) {
     highlightManagerRef.current?.updateHighlights(matches, newIndex);
     navigateToMatchInternal(matches, newIndex);
   }, [matches, currentMatchIndex, navigateToMatchInternal]);
+
+  // Find Next / Previous from the app menu (Cmd+G / Cmd+Shift+G)
+  const navigateHandlersRef = useRef({ handleNext, handlePrevious });
+  navigateHandlersRef.current = { handleNext, handlePrevious };
+  useEffect(() => {
+    const handleNavigate = (changedTabId: string, direction: SearchNavigateDirection) => {
+      if (changedTabId !== tabId) return;
+      if (direction === 'next') {
+        navigateHandlersRef.current.handleNext();
+      } else {
+        navigateHandlersRef.current.handlePrevious();
+      }
+    };
+    SearchReplaceStateManager.addNavigateListener(handleNavigate);
+    return () => {
+      SearchReplaceStateManager.removeNavigateListener(handleNavigate);
+    };
+  }, [tabId]);
 
   // Replace current match
   const handleReplace = useCallback(() => {

@@ -9,11 +9,12 @@
  */
 
 import React, { useCallback, useState, useEffect, useRef, useMemo, forwardRef, useImperativeHandle } from 'react';
-import { useAtomValue } from 'jotai';
+import { useAtomValue, useSetAtom } from 'jotai';
+import { setTitleBarCreateMenuAtom } from '../../store/atoms/titleBarCreate';
 import type { CollabScope } from '@nimbalyst/collab-client/core';
 import { createCollabDocsScopeLifecycle } from '@nimbalyst/collab-client/docs';
 import { store } from '@nimbalyst/runtime/store';
-import { CollabSidebar } from '@nimbalyst/collab-client/docs-ui';
+import { CollabSidebar, type CollabSidebarCreateMenu } from '@nimbalyst/collab-client/docs-ui';
 import { ElectronCollabDocsUIProvider } from './ElectronCollabDocsUIProvider';
 import { TabsProvider, useTabsActions, useTabs, useTabNavigationShortcuts, type TabData } from '../../contexts/TabsContext';
 import { TabManager } from '../TabManager/TabManager';
@@ -46,12 +47,6 @@ import {
 } from '../../store/atoms/collabDocuments';
 import { changedDocIdsAtom } from '../../store/atoms/collabDiscovery';
 import { SHARED_HOME_TAB_URI, SHARED_HOME_TAB_TITLE, isSharedHomeTab } from './sharedHomeTab';
-import {
-  SHARED_FEEDBACK_TAB_TITLE,
-  SHARED_FEEDBACK_TAB_URI,
-  isSharedFeedbackTab,
-} from './sharedFeedbackTab';
-import { SharedFeedbackTabButton } from './Feedback';
 import { isCollabUri, parseCollabUri } from '@nimbalyst/collab-protocol';
 import {
   getCollabNodeName,
@@ -61,7 +56,7 @@ import {
   reconcileSharedDocumentDisplayName,
 } from './collabTree';
 import { errorNotificationService } from '../../services/ErrorNotificationService';
-import type { SerializableDocumentContext } from '../../hooks/useDocumentContext';
+import { collabFileType, type SerializableDocumentContext } from '../../hooks/useDocumentContext';
 import { getTextSelection } from '../UnifiedAI/TextSelectionIndicator';
 import { getActiveEditorContextItems } from '../../stores/editorContextStore';
 import { categorizeTeamAnalyticsError, toStableAnalyticsCategory } from '../../../shared/analytics/teamAnalytics';
@@ -86,6 +81,8 @@ export interface CollabModeRef {
   toggleChatCollapsed: () => void;
   toggleEditorMaximized: () => void;
   createNewChatSession: () => Promise<void>;
+  /** Creates a shared Markdown doc in the sidebar's current target folder. */
+  createNewDocument: () => void;
 }
 
 export const CollabMode = forwardRef<CollabModeRef, CollabModeProps>(function CollabMode({
@@ -221,6 +218,39 @@ export const CollabModeInner = forwardRef<CollabModeRef, CollabModeInnerProps>(f
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [chatCollapsed, setChatCollapsed] = useState(false);
   const chatSidebarRef = useRef<ChatSidebarRef>(null);
+  /**
+   * The sidebar builds the shared-document type list (it owns the catalog
+   * filtering); this republishes it for the title bar's create control.
+   */
+  const setTitleBarCreateMenu = useSetAtom(setTitleBarCreateMenuAtom);
+  const createPrimaryRef = useRef<(() => void) | null>(null);
+  const registerCreateMenu = useCallback(
+    (menu: CollabSidebarCreateMenu | null) => {
+      createPrimaryRef.current = menu?.onPrimary ?? null;
+      if (!menu) {
+        setTitleBarCreateMenu('collab', null);
+        return;
+      }
+      setTitleBarCreateMenu('collab', {
+        mode: 'collab',
+        destination: menu.destination,
+        heading: { label: 'Shared with team', icon: 'groups' },
+        onPrimary: menu.onPrimary,
+        primaryTrailing: menu.primaryTrailing,
+        items: [
+          ...menu.items,
+          {
+            id: 'folder',
+            label: 'New folder',
+            icon: 'create_new_folder',
+            separatorBefore: true,
+            onSelect: menu.onNewFolder,
+          },
+        ],
+      });
+    },
+    [setTitleBarCreateMenu]
+  );
 
   useEffect(() => {
     onPanelStateChange?.({ sidebarCollapsed, chatCollapsed });
@@ -230,13 +260,6 @@ export const CollabModeInner = forwardRef<CollabModeRef, CollabModeInnerProps>(f
   // dedupes by URI, so this focuses the existing tab if present.
   const openSharedHomeTab = useCallback((switchToTab = true) => {
     tabsActions.addTab(SHARED_HOME_TAB_URI, '', switchToTab, SHARED_HOME_TAB_TITLE);
-  }, [tabsActions]);
-
-  // The feedback list is a singleton tab for the same reason the home is: it is
-  // a surface over the whole shared area rather than one document, and a second
-  // copy of it would be a second copy of the same list.
-  const openSharedFeedbackTab = useCallback(() => {
-    tabsActions.addTab(SHARED_FEEDBACK_TAB_URI, '', true, SHARED_FEEDBACK_TAB_TITLE);
   }, [tabsActions]);
 
   // Refs for sidebar resize drag (avoids re-renders during drag)
@@ -287,7 +310,7 @@ export const CollabModeInner = forwardRef<CollabModeRef, CollabModeInnerProps>(f
 
     return {
       filePath: activeTab.filePath,
-      fileType: 'collab-markdown',
+      fileType: collabFileType(activeTab.filePath),
       content,
       textSelection,
       textSelectionTimestamp: textSelection?.timestamp,
@@ -325,7 +348,7 @@ export const CollabModeInner = forwardRef<CollabModeRef, CollabModeInnerProps>(f
     window.electronAPI.updateMcpDocumentState({
       content: '',
       filePath: activeTab.filePath,
-      fileType: 'collab-markdown',
+      fileType: collabFileType(activeTab.filePath),
       workspacePath: scope.scopeKey,
       cursorPosition: undefined,
       selection: undefined,
@@ -709,12 +732,6 @@ export const CollabModeInner = forwardRef<CollabModeRef, CollabModeInnerProps>(f
     return tab ? isSharedHomeTab(tab.filePath) : false;
   }, [activeTabId, tabs]);
 
-  const activeTabIsFeedback = useMemo(() => {
-    if (!activeTabId) return false;
-    const tab = tabs.find((t) => t.id === activeTabId);
-    return tab ? isSharedFeedbackTab(tab.filePath) : false;
-  }, [activeTabId, tabs]);
-
   // File path of the active collab document, so the chat panel scopes its
   // "+ selection" chips to the doc the user is actually looking at. Without a
   // currentFilePath the chip row falls back to "most recent" and leaks a stale
@@ -772,6 +789,9 @@ export const CollabModeInner = forwardRef<CollabModeRef, CollabModeInnerProps>(f
       }
       await chatSidebarRef.current?.createNewSession();
     },
+    createNewDocument: () => {
+      createPrimaryRef.current?.();
+    },
   }), [
     activeTabId,
     tabs,
@@ -792,16 +812,15 @@ export const CollabModeInner = forwardRef<CollabModeRef, CollabModeInnerProps>(f
       {!sidebarCollapsed && (
         <>
           <div style={{ width: sidebarWidth, minWidth: COLLAB_SIDEBAR_MIN, maxWidth: COLLAB_SIDEBAR_MAX }} className="shrink-0">
+            {/* No Feedback action here any more: the request list is an
+                organization surface, not a shared-docs one, and it moved beside
+                the Inbox in Org mode (#3704). A document's own feedback still
+                reaches it through the per-artifact backlinks. */}
             <CollabSidebar
               activeDocumentId={activeCollabDocumentId}
               onShowHome={() => openSharedHomeTab(true)}
               homeActive={activeTabIsHome}
-              headerActions={(
-                <SharedFeedbackTabButton
-                  active={activeTabIsFeedback}
-                  onOpen={openSharedFeedbackTab}
-                />
-              )}
+              registerCreateMenu={registerCreateMenu}
             />
           </div>
 

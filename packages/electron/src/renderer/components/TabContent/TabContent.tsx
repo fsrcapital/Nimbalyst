@@ -28,8 +28,6 @@ import { TrackerResourceEditor } from '../AgentMode/TrackerResourceEditor';
 import { SharedDocsListView } from '@nimbalyst/collab-client/docs-ui';
 import { ElectronCollabDocsUIRoot } from '../CollabMode/ElectronCollabDocsUIProvider';
 import { isSharedHomeTab } from '../CollabMode/sharedHomeTab';
-import { isSharedFeedbackTab } from '../CollabMode/sharedFeedbackTab';
-import { FeedbackSection } from '../CollabMode/Feedback';
 import { FeedbackRequestResultsTab } from '../FeedbackRequest/FeedbackRequestResultsTab';
 import { isFeedbackRequestTab } from '../FeedbackRequest/feedbackRequestTab';
 import { isCollabUri, parseCollabUri } from '@nimbalyst/collab-protocol';
@@ -41,6 +39,7 @@ import {
 } from '../../utils/collabDocumentOpener';
 import { getPersistedCollabDocMetadata } from '../../utils/collabOpenDocsPersistence';
 import { store, editorDirtyAtom, editorHasUnacceptedChangesAtom, makeEditorKey } from '@nimbalyst/runtime/store';
+import { titleBarCreateMenusAtom } from '../../store/atoms/titleBarCreate';
 import { clearMockupAnnotationsForFile, getMockupFilePath } from '../UnifiedAI/MockupAnnotationIndicator';
 import { resolveDesktopCollabScope } from '../../store/atoms/collabDocuments';
 
@@ -174,9 +173,8 @@ const TabContentComponent: React.FC<TabContentProps> = ({
       return '';
     }
 
-    // Feedback request results are synced state, not content on disk. Same for
-    // the shared area's feedback list, which reads the local index.
-    if (isFeedbackRequestTab(filePath) || isSharedFeedbackTab(filePath)) {
+    // Feedback request results are synced state, not content on disk.
+    if (isFeedbackRequestTab(filePath)) {
       return '';
     }
 
@@ -348,41 +346,13 @@ const TabContentComponent: React.FC<TabContentProps> = ({
                 // Own React root: context does not cross, so the Shared Docs
                 // context has to be re-established here or the view throws.
                 <ElectronCollabDocsUIRoot scope={propsRef.current.collabScope}>
-                  <SharedDocsListView />
+                  {/* Creation is owned by the sidebar and republished for the
+                      title bar; the home view triggers that same action rather
+                      than opening a creation path of its own. */}
+                  <SharedDocsListView
+                    onCreateDocument={() => store.get(titleBarCreateMenusAtom).collab?.onPrimary?.()}
+                  />
                 </ElectronCollabDocsUIRoot>
-              )
-              : null}
-          </TabEditorErrorBoundary>
-        </JotaiProvider>
-      );
-      tabInstancesRef.current.set(tab.id, { root, element, tabData: tab, content });
-      return;
-    }
-
-    // The shared area's feedback list: every request this member is party to,
-    // read from the local org index. Like the Shared Docs Home it is a virtual
-    // surface with no save/dirty/getContent wiring, and opening a row mounts
-    // the request's own room inside it.
-    if (isSharedFeedbackTab(tab.filePath)) {
-      root.render(
-        <JotaiProvider store={store}>
-          <TabEditorErrorBoundary
-            filePath={tab.filePath}
-            fileName={tab.fileName}
-            onRetry={() => {
-              removeTabEditor(tab.id);
-              createTabEditor(tab, content);
-            }}
-            onClose={() => {
-              propsRef.current.onTabClose?.(tab.id);
-            }}
-          >
-            {propsRef.current.collabScope
-              ? (
-                <FeedbackSection
-                  orgId={propsRef.current.collabScope.orgId}
-                  workspacePath={propsRef.current.workspaceId}
-                />
               )
               : null}
           </TabEditorErrorBoundary>

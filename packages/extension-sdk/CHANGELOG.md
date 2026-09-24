@@ -8,6 +8,7 @@ The SDK is versioned independently of the Nimbalyst app. Each release declares i
 
 | SDK version | Minimum Nimbalyst app version |
 | --- | --- |
+| 0.6.0 | 0.78.0 |
 | 0.5.0 | 0.70.0 |
 | 0.4.0 | 0.70.0 |
 | 0.3.0 | 0.70.0 |
@@ -18,6 +19,29 @@ The SDK is versioned independently of the Nimbalyst app. Each release declares i
 | 0.1.0 | 0.58.5 |
 
 ## [Unreleased]
+
+## [0.6.0] - 2026-09-14
+
+Requires Nimbalyst 0.78.0, available on the alpha channel at publication, for the complete host API including native screenshots.
+
+### Added
+
+- `CollaborationCommentsService`, `CommentAnchor`, and codec-level `commentAnchors` let collaborative editors mount the platform comment experience and resolve structured anchors both live and headlessly.
+- `host.registerViewport()` and `EditorViewport` let an editor expose proportional scroll position to hosts that carry the reader's place between related documents; `createReadOnlyHost()` can receive those registrations.
+- `contributions.customEditors[].collaboration.documentType` lets a host identify a collaborative document type from the manifest before its extension bundle and codec are loaded.
+- `screenshotService` exposes host-provided element and file screenshots, including unopened documents.
+- `PanelHost.getWorkspaceFolders()` and `getPrimaryFolderPath()` expose multiple workspace roots; file-tree helpers accept those roots.
+- `EditorHost.getAssetUrl()` and the `assetUrls` capability let media editors stream local files through a host-provided URL.
+- The `agents`, `types/editor`, and `git-operation-log` entry points expose agent contracts, editor types, and Git operation selectors.
+- `ProtocolSession.appliedModel` and `deliveredMcpServerCount` report the model and MCP servers actually used by an agent.
+
+### Changed
+
+- `CollabCodec` documents file-form fallback for headless agent edits when no structured patch pair exists, while recommending structured edits for minimal concurrent deltas.
+
+### Fixed
+
+- Agent host declarations use a Node-compatible relative import for consumers using Node16 or NodeNext module resolution.
 
 ## [0.5.0]
 

@@ -1,5 +1,6 @@
 import { BrowserWindow, type IpcMainEvent, type IpcMainInvokeEvent, app, shell } from 'electron';
 import { safeHandle, safeOn } from '../utils/ipcRegistry';
+import { registerTrackerCreationHandlers } from '../ipc/TrackerCreationHandlers';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import type {
@@ -15,18 +16,22 @@ import type {
 } from '@nimbalyst/runtime';
 import crypto from 'crypto';
 import { getCurrentIdentity } from './TrackerIdentityService';
+import { createNativeTrackerItem, type NativeTrackerCreatePayload } from './tracker/createNativeTrackerItem';
 import { applyCommentMutation, type CommentMutation } from './tracker/commentMutations';
 import { appendActivity } from './tracker/trackerActivity';
-import { extractItemCustomFields } from './tracker/trackerRowCustomFields';
+import { COLUMN_ONLY_IDENTITY_KEYS, extractItemCustomFields } from './tracker/trackerRowCustomFields';
 import { fromDbBoolean } from './tracker/trackerDbValue';
 import {
   getBacklinks as getRelationshipBacklinks,
   reindexItemRelationships,
+  reindexItemRelationshipsAfterWrite,
   reindexItemsRelationships,
+  trackerRowUpdatedToIso,
   rebuildWorkspaceRelationshipIndex,
 } from './tracker/trackerRelationshipIndexStore';
 import { propagateInverseRelationships } from './tracker/inverseRelationshipWrites';
 import { applyRelationshipFieldWrites } from './tracker/relationshipFieldWrite';
+import { pinCitedRevisions } from './tracker/citationPins';
 import {
   validateRelationshipReindexPayload,
   validateTrackerItemBatchPayload,
@@ -40,6 +45,7 @@ import { projectionWouldChange } from './tracker/projectionUpdateGuard';
 import { assignLocalKeysToRows } from './tracker/localKeyAllocator';
 import { workspaceLocalKeyStore } from './tracker/workspaceLocalKeyStore';
 import { extractFrontmatter, extractCommonFields } from '../utils/frontmatterReader';
+import { frontmatterHashChanged } from './documentMetadataChange';
 import {
   PLAN_INVALID_STATUS_SIGNAL_KIND,
   VIRTUAL_DOCS,
@@ -55,7 +61,7 @@ import {
   buildFullDocumentTrackerId,
   parseFullDocumentTrackerId,
 } from '@nimbalyst/runtime/plugins/TrackerPlugin/documentHeader/frontmatterUtils';
-import { globalRegistry } from '@nimbalyst/runtime/plugins/TrackerPlugin/models/TrackerDataModel';
+import { globalRegistry } from '@nimbalyst/tracker-schema';
 import { database } from '../database/PGLiteDatabaseWorker';
 import { shouldExcludeDir, shouldExcludePath } from '../utils/fileFilters';
 import { isRendererUnsupportedImage, resolveImageExtension, sniffImageExtension } from '../utils/imageFormat';
@@ -407,6 +413,15 @@ export class ElectronDocumentService implements DocumentService {
   private metadataByPath: Map<string, DocumentMetadataEntry> = new Map();
   private metadataWatchers: Map<string, (change: MetadataChangeEvent) => void> = new Map();
   private fileStateCache: Map<string, { mtime: number; size: number; hash?: string }> = new Map();
+  /**
+   * Markdown files observed to contain no inline tracker markers and to own no
+   * `tracker_items` rows, keyed by the content hash that was true of. Lets
+   * `updateTrackerItemsCache` skip both of its queries for the common case.
+   * TTL-bounded because other writers can create a row for a path without
+   * touching the file.
+   */
+  private trackerItemsEmptyCache: Map<string, { hash: string; expiresAt: number }> = new Map();
+  private readonly TRACKER_ITEMS_EMPTY_TTL_MS = 5 * 60 * 1000;
   private initializationPromise: Promise<void> | null = null;
 
   // Tracker items cache
@@ -659,7 +674,7 @@ export class ElectronDocumentService implements DocumentService {
           }
 
           // Check if frontmatter actually changed
-          if (!cachedState || cachedState.hash !== hash) {
+          if (!cachedState || frontmatterHashChanged(cachedState.hash, hash)) {
             const commonFields = data ? extractCommonFields(data) : {};
 
             const metadata: DocumentMetadataEntry = {
@@ -1143,7 +1158,7 @@ export class ElectronDocumentService implements DocumentService {
       const cachedState = this.fileStateCache.get(relativePath);
 
       // Always update if hash changed or no cache exists
-      if (!cachedState || cachedState.hash !== hash) {
+      if (!cachedState || frontmatterHashChanged(cachedState.hash, hash)) {
         const commonFields = data ? extractCommonFields(data) : {};
 
         // Find the document entry, or create one if it doesn't exist
@@ -1334,8 +1349,13 @@ export class ElectronDocumentService implements DocumentService {
   }
 
   private async listMergedTrackerItems(): Promise<TrackerItem[]> {
+    // `deleted_at IS NULL` because a tombstone is a row, not an absence: both a
+    // teammate's delta (`applyRemoteItem`) and our own queued offline delete
+    // (`applyOptimistic`) mark the row rather than removing it. Without this
+    // filter the deleted item vanished from the atoms via the `removed`
+    // broadcast and then came back on the next full list.
     const result = await database.query<any>(
-      `SELECT * FROM tracker_items WHERE workspace = $1 ORDER BY kanban_sort_order ASC NULLS LAST, last_indexed DESC`,
+      `SELECT * FROM tracker_items WHERE workspace = $1 AND deleted_at IS NULL ORDER BY kanban_sort_order ASC NULLS LAST, last_indexed DESC`,
       [this.workspacePath]
     );
     await this.assignLocalKeysFrom(result.rows);
@@ -1911,6 +1931,7 @@ export class ElectronDocumentService implements DocumentService {
         'created', 'updated', 'dueDate', 'assigneeEmail', 'reporterEmail',
         'authorIdentity', 'lastModifiedBy', 'createdByAgent', 'assigneeId',
         'reporterId', 'labels', 'linkedSessions', 'linkedCommitSha', 'documentId',
+        ...COLUMN_ONLY_IDENTITY_KEYS,
       ])),
     };
   }
@@ -2042,6 +2063,18 @@ export class ElectronDocumentService implements DocumentService {
       throw new Error(`Tracker item not found: ${itemId}`);
     }
     const updated = this.rowToTrackerItem(result.rows[0]);
+
+    // Keep the edge projection with the write. Without this the index is only
+    // maintained by the renderer's reindex IPC, so an item written by MCP, the
+    // CLI or the commit linker has relationship values and no edges.
+    await reindexItemRelationshipsAfterWrite(
+      row.workspace,
+      row.id,
+      data,
+      globalRegistry.get(row.type)?.fields ?? [],
+      trackerRowUpdatedToIso(result.rows[0]?.updated),
+      database as any,
+    );
 
     const changeEvent: TrackerItemChangeEvent = {
       added: [],
@@ -2330,7 +2363,13 @@ export class ElectronDocumentService implements DocumentService {
       // so a draft item's body save would otherwise leak to
       // the room. The legit frontmatter body-share path (shareFrontmatterBody)
       // still passes here because by then the row carries the share flag.
-      if (isTrackerSyncActive(item.workspace) && this.shouldSyncItemNow(item)) {
+      //
+      // Offline, mark the row pending instead. Without the else the bumped
+      // `body_version` never reached the room, so cold peers kept reading a
+      // stale body version indefinitely (NIM-3657).
+      if (this.shouldSyncItemNow(item) && !isTrackerSyncActive(item.workspace)) {
+        await this.updateTrackerItemSyncStatus(item.id, 'pending');
+      } else if (isTrackerSyncActive(item.workspace) && this.shouldSyncItemNow(item)) {
         try {
           await syncTrackerItem(item);
         } catch (syncErr) {
@@ -2496,12 +2535,18 @@ export class ElectronDocumentService implements DocumentService {
 
     // Push archived state to sync server so other clients see it. Gate on the
     // per-item publication state (NIM-880) so a draft item doesn't leak to the
-    // room just because it was archived.
-    if (isTrackerSyncActive(item.workspace) && this.shouldSyncItemNow(item)) {
-      try {
-        await syncTrackerItem(item);
-      } catch (syncErr) {
-        console.error('[DocumentService] archiveTrackerItem sync failed:', syncErr);
+    // room just because it was archived. Offline, mark the row pending so the
+    // reconnect drain pushes it -- without the else, an offline archive of an
+    // already-synced item never entered the candidate set (NIM-3657).
+    if (this.shouldSyncItemNow(item)) {
+      if (isTrackerSyncActive(item.workspace)) {
+        try {
+          await syncTrackerItem(item);
+        } catch (syncErr) {
+          console.error('[DocumentService] archiveTrackerItem sync failed:', syncErr);
+        }
+      } else {
+        await this.updateTrackerItemSyncStatus(item.id, 'pending');
       }
     }
 
@@ -2540,13 +2585,21 @@ export class ElectronDocumentService implements DocumentService {
       [rowId]
     );
 
-    // Notify sync server so other clients remove the item too
-    if (isTrackerSyncActive(this.workspacePath)) {
-      try {
-        await unsyncTrackerItem(rowId, this.workspacePath);
-      } catch (syncErr) {
-        console.error('[DocumentService] deleteTrackerItem sync failed:', syncErr);
-      }
+    // Notify sync server so other clients remove the item too.
+    //
+    // Deliberately NOT gated on `isTrackerSyncActive`. The local row is already
+    // hard-deleted, so an offline delete that skips the engine leaves nothing
+    // behind to carry the intent -- not even for the next launch's drain, which
+    // selects surviving rows. Deleting the newest item also lowers
+    // `MAX(sync_id)`, so the next bootstrap re-delivers it and re-inserts it
+    // (NIM-3658). The engine is the right place to decide: it enqueues into
+    // `tracker_transactions`, sends now if the socket is open, and otherwise
+    // replays on the next reconnect and across restarts. `unsyncTrackerItem`
+    // is already a no-op for a workspace with no engine.
+    try {
+      await unsyncTrackerItem(rowId, this.workspacePath);
+    } catch (syncErr) {
+      console.error('[DocumentService] deleteTrackerItem sync failed:', syncErr);
     }
 
     const changeEvent: TrackerItemChangeEvent = {
@@ -2929,131 +2982,24 @@ export class ElectronDocumentService implements DocumentService {
    * Used for proper collaborative tracked items created from the UI.
    * These items have empty document_path and don't correspond to any file.
    */
-  async createTrackerItem(payload: {
-    id: string;
-    type: string;
-    title: string;
-    status: string;
-    priority: string;
-    workspace: string;
-    description?: string;
-    owner?: string;
-    tags?: string[];
-    customFields?: Record<string, any>;
-    content?: any;
-    source?: string;
-    sourceRef?: string;
-    sharing?: 'personal' | 'team';
-    draftByDefault?: boolean;
-  }): Promise<TrackerItem> {
-    // Check if this type allows creation
-    const model = globalRegistry.get(payload.type);
-    if (model && model.creatable === false) {
-      throw new Error(`Cannot create items of type '${payload.type}': type is not creatable`);
-    }
+  assertWorkspace(workspacePath: string): void {
+    if (!workspacePath || path.resolve(workspacePath) !== path.resolve(this.workspacePath)) throw new Error('Workspace does not match the calling window');
+  }
 
-    // Stamp author identity on creation
-    // getCurrentIdentity imported statically at top of file
-    const authorIdentity = getCurrentIdentity(payload.workspace);
-
-    // Assign initial kanbanSortOrder: place new items at the top of their column.
-    // Query the current minimum sort key for this workspace+status so the new item sorts before it.
-    let initialSortOrder = 'a0';
-    try {
-      const minKeyResult = await database.query<any>(
-        `SELECT MIN(kanban_sort_order) as min_key FROM tracker_items WHERE workspace = $1 AND status = $2 AND kanban_sort_order IS NOT NULL`,
-        [payload.workspace, payload.status]
-      );
-      const minKey = minKeyResult.rows[0]?.min_key;
-      if (minKey) {
-        const { generateKeyBetween } = await import('@nimbalyst/runtime/utils/fractionalIndex');
-        initialSortOrder = generateKeyBetween(null, minKey);
-      }
-    } catch (e) {
-      // Non-fatal: fall back to default sort order
-    }
-
-    const data: Record<string, any> = {
-      title: payload.title,
-      status: payload.status,
-      priority: payload.priority,
-      kanbanSortOrder: initialSortOrder,
-      created: new Date().toISOString().split('T')[0],
-      authorIdentity,
-      reporterEmail: authorIdentity.email || authorIdentity.gitEmail || undefined,
-    };
-    if (payload.description) data.description = payload.description;
-    if (payload.owner) data.owner = payload.owner;
-    if (payload.tags && payload.tags.length > 0) data.tags = payload.tags;
-    if (payload.customFields) {
-      Object.assign(data, payload.customFields);
-    }
-
-    const source = payload.source || 'native';
-    const contentJson = payload.content ? JSON.stringify(payload.content) : null;
-    const sharingPolicy = getEffectiveTrackerSharingPolicy(payload.workspace, payload.type, payload);
-    const syncStatus = getInitialTrackerSyncStatus(sharingPolicy, data);
-
-    // NIM-454: persist the tracker-type tag on the row so the item reliably
-    // appears in its type view and syncs correctly, instead of relying on a
-    // read-time fallback. Mirrors the MCP create path (typeTags always includes
-    // the primary type). The DB layer maps a JS array to TEXT[] on PGLite / a
-    // JSON string on better-sqlite3.
-    const typeTags: string[] = [payload.type];
-
-    await database.query(
-      `INSERT INTO tracker_items (
-        id, type, type_tags, data, workspace, document_path, line_number,
-        created, updated, last_indexed, sync_status,
-        content, archived, source, source_ref
-      ) VALUES ($1, $2, $3, $4, $5, '', NULL, NOW(), NOW(), NOW(), $6, $7, FALSE, $8, $9)`,
-      [
-        payload.id,
-        payload.type,
-        typeTags,
-        JSON.stringify(data),
-        payload.workspace,
-        syncStatus,
-        contentJson,
-        source,
-        payload.sourceRef || null,
-      ]
-    );
-
-    const result = await database.query<any>(
-      `SELECT * FROM tracker_items WHERE id = $1`,
-      [payload.id]
-    );
-    if (result.rows.length === 0) {
-      throw new Error(`Failed to create tracker item ${payload.id}`);
-    }
-
-    // The insert leaves `local_key` NULL. Sweep before mapping, so the item
-    // handed to the watcher -- which the renderer inserts optimistically --
-    // carries its number instead of rendering keyless until the next re-list.
-    await this.assignLocalKeysFrom(result.rows);
-
-    const created = this.rowToTrackerItem(result.rows[0]);
-
-    // Notify watchers
-    const changeEvent: TrackerItemChangeEvent = {
-      added: [created],
-      updated: [],
-      removed: [],
-      timestamp: new Date(),
-    };
-    this.trackerItemWatchers.forEach(callback => callback(changeEvent));
-
-    return created;
+  async createTrackerItem(payload: NativeTrackerCreatePayload): Promise<TrackerItem> {
+    return createNativeTrackerItem(payload, {
+      assignLocalKeysFrom: (rows) => this.assignLocalKeysFrom(rows),
+      rowToTrackerItem: (row) => this.rowToTrackerItem(row),
+      notify: (change) => this.trackerItemWatchers.forEach((callback) => callback(change)),
+    });
   }
 
   /**
    * Parse tracker items from markdown content
    * Note: This function is only called for .md and .markdown files
    */
-  private async parseTrackerItems(filePath: string, relativePath: string): Promise<ParsedInlineTrackerCandidate[]> {
+  private parseTrackerItems(content: string, relativePath: string): ParsedInlineTrackerCandidate[] {
     try {
-      const content = await fs.readFile(filePath, 'utf-8');
       const items: ParsedInlineTrackerCandidate[] = [];
       const lines = content.split('\n');
 
@@ -3200,9 +3146,28 @@ export class ElectronDocumentService implements DocumentService {
     // console.log(`[DocumentService] updateTrackerItemsCache called for: ${relativePath}`);
     // console.log(`[DocumentService] Full path: ${fullPath}`);
 
+    // Most markdown files contain no inline tracker markers, and this runs on
+    // every metadata refresh — 14,709 calls in a five-minute window (~49/s),
+    // two tracker_items round trips each, on a FIFO single-lane DB worker where
+    // round-trip count is the cost. Once a file is known to have no markers and
+    // no rows, an unchanged copy of it has nothing to do; skip both queries.
+    let content: string;
+    try {
+      content = await fs.readFile(fullPath, 'utf-8');
+    } catch (error) {
+      console.error(`[DocumentService] Failed to read ${relativePath} for tracker items:`, error);
+      return;
+    }
+    const contentHash = crypto.createHash('md5').update(content).digest('hex');
+    const nowMs = Date.now();
+    const knownEmpty = this.trackerItemsEmptyCache.get(relativePath);
+    if (knownEmpty && knownEmpty.hash === contentHash && knownEmpty.expiresAt > nowMs) {
+      return;
+    }
+
     try {
       // Parse tracker items from the file
-      const parsedItems = await this.parseTrackerItems(fullPath, relativePath);
+      const parsedItems = this.parseTrackerItems(content, relativePath);
       // TODO: Debug logging - uncomment if needed for troubleshooting
       // console.log(`[DocumentService] Found ${items.length} tracker items in ${relativePath}`);
       // if (items.length > 0) {
@@ -3218,6 +3183,18 @@ export class ElectronDocumentService implements DocumentService {
         [this.workspacePath, relativePath]
       );
       // console.log(`[DocumentService] Found ${existingResult.rows.length} existing tracker items in database`);
+      // Nothing in the file, nothing in the table: remember it against this
+      // exact content so re-refreshes of an unchanged file cost no queries.
+      // The entry expires so a row written for this path by another writer
+      // (MCP tracker_create, the tracker store) still gets reconciled.
+      if (parsedItems.length === 0 && existingResult.rows.length === 0) {
+        this.trackerItemsEmptyCache.set(relativePath, {
+          hash: contentHash,
+          expiresAt: nowMs + this.TRACKER_ITEMS_EMPTY_TTL_MS,
+        });
+      } else {
+        this.trackerItemsEmptyCache.delete(relativePath);
+      }
       const existingIds = new Set(existingResult.rows.map(row => row.id));
       const items = resolveInlineTrackerIds(parsedItems, existingResult.rows, relativePath);
       const newIds = new Set(items.map(item => item.id));
@@ -3815,59 +3792,8 @@ export function setupDocumentServiceHandlers(resolver: DocumentServiceResolver) 
     }
   });
 
-  // Create tracker item directly in PGLite (bypassing markdown files)
-  safeHandle('document-service:create-tracker-item', async (event, payload: {
-    id: string;
-    type: string;
-    title: string;
-    status: string;
-    priority: string;
-    workspace: string;
-    description?: string;
-    owner?: string;
-    tags?: string[];
-    customFields?: Record<string, any>;
-    sharing?: 'personal' | 'team';
-    draftByDefault?: boolean;
-  }) => {
-    try {
-      const sharingPolicy = getEffectiveTrackerSharingPolicy(payload.workspace, payload.type, payload);
-      // console.log('[DocumentService] create-tracker-item called:', {
-      //   id: payload.id,
-      //   type: payload.type,
-      //   requestedSharing: payload.sharing,
-      //   effectiveSharingPolicy: sharingPolicy,
-      //   workspace: payload.workspace,
-      // });
-      const item = await requireDocumentService(event).createTrackerItem(payload);
-      // console.log('[DocumentService] create-tracker-item created locally:', item.id);
-
-      if (shouldSyncTrackerItem(sharingPolicy, item)) {
-        const active = isTrackerSyncActive(payload.workspace);
-        // console.log('[DocumentService] create-tracker-item sync check:', { sharingPolicy, active });
-        if (active) {
-          try {
-            await syncTrackerItem(item);
-            // console.log('[DocumentService] create-tracker-item synced to TrackerRoom:', item.id);
-          } catch (syncErr) {
-            console.error('[DocumentService] create-tracker-item sync failed (item still created locally):', syncErr);
-          }
-        }
-      }
-
-      trackTrackerMutation({
-        itemId: item.id,
-        action: 'created',
-        collaborationScope: trackerCollaborationScope(sharingPolicy, item),
-        trackerType: item.type,
-        view: 'service',
-      });
-
-      return { success: true, item };
-    } catch (error) {
-      console.error('[DocumentService] create-tracker-item failed:', error);
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
+  registerTrackerCreationHandlers(requireDocumentService, (item, shared) => {
+    trackTrackerMutation({ itemId: item.id, action: 'created', collaborationScope: shared ? 'shared' : 'personal', trackerType: item.type, view: 'service' });
   });
 
   /**
@@ -3895,10 +3821,12 @@ export function setupDocumentServiceHandlers(resolver: DocumentServiceResolver) 
       // can't be read here we simply skip inverse propagation for this update.
       let oldData: Record<string, unknown> = {};
       let oldType: string | null = null;
+      let oldWorkspace: string | null = null;
       try {
-        const oldRow = await database.query<any>(`SELECT type, data FROM tracker_items WHERE id = $1`, [payload.itemId]);
+        const oldRow = await database.query<any>(`SELECT type, data, workspace FROM tracker_items WHERE id = $1`, [payload.itemId]);
         if (oldRow.rows[0]) {
           oldType = oldRow.rows[0].type ?? null;
+          oldWorkspace = oldRow.rows[0].workspace ?? null;
           oldData = parseJsonColumn<Record<string, unknown>>(oldRow.rows[0].data) ?? {};
         }
       } catch { /* skip inverse propagation if old data is unavailable */ }
@@ -3913,6 +3841,7 @@ export function setupDocumentServiceHandlers(resolver: DocumentServiceResolver) 
         if (!relWrite.ok) {
           throw new Error(`Invalid relationship field "${relWrite.field}": ${relWrite.errors.join('; ')}`);
         }
+        if (oldWorkspace) await pinCitedRevisions(database, oldWorkspace, payload.itemId, updates, globalRegistry.get(oldType)?.fields ?? []);
       }
 
       const item = await svc.updateTrackerItem(payload.itemId, updates);

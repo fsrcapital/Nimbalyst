@@ -18,12 +18,14 @@
  */
 
 import type { Awareness } from 'y-protocols/awareness';
+import { pickCursorColor } from './collabCursorColor';
 import type { DocumentSyncStatus } from '@nimbalyst/runtime/sync';
 import type { DocumentSyncProvider } from '@nimbalyst/runtime/sync';
 import type {
   CollaborationContext,
   CollaborationStatus,
   EditorHost,
+  EditorViewport,
   ExtensionStorage,
   RevisionSnapshotAdapter,
 } from '@nimbalyst/runtime';
@@ -40,6 +42,11 @@ import {
   registerEditorAPI,
   unregisterEditorAPI,
 } from '@nimbalyst/runtime';
+import {
+  createHostedCollaborationComments,
+  type CollaborationCommentsHostConfig,
+  type HostedCollaborationComments,
+} from './collaborationCommentsService';
 
 /**
  * The DocumentSync -> y-protocols awareness bridge now lives in the runtime so
@@ -66,6 +73,8 @@ export function createCollaborationContext(args: {
   syncProvider: DocumentSyncProvider;
   awareness: Awareness;
   activeConfig: CollabDocumentConfig;
+  /** Omit when this host cannot provide live document-comment authority. */
+  comments?: CollaborationCommentsHostConfig;
   /**
    * Called whenever a custom editor registers (or unregisters) a revision
    * snapshot adapter. The CollaborativeTabEditor uses this to publish a
@@ -74,18 +83,29 @@ export function createCollaborationContext(args: {
    */
   onRevisionAdapterChange?: (adapter: RevisionSnapshotAdapter | null) => void;
 }): CollaborationContext {
-  const { syncProvider, awareness, activeConfig, onRevisionAdapterChange } = args;
+  const {
+    syncProvider,
+    awareness,
+    activeConfig,
+    comments,
+    onRevisionAdapterChange,
+  } = args;
   let currentAdapter: RevisionSnapshotAdapter | null = null;
   const contentFlushes = new Set<() => void | Promise<void>>();
+  const yDoc = syncProvider.getYDoc();
+  const hostedComments = comments
+    ? createHostedCollaborationComments({ yDoc, host: comments })
+    : null;
 
   const context: CollaborationContext = {
-    yDoc: syncProvider.getYDoc(),
+    yDoc,
     awareness,
     user: {
       id: activeConfig.teamMemberId,
       name: activeConfig.userName ?? activeConfig.teamMemberId,
       color: pickCursorColor(activeConfig.teamMemberId),
     },
+    ...(hostedComments ? { comments: hostedComments.service } : {}),
     getStatus: () => syncProvider.getStatus() as CollaborationStatus,
     onStatusChange: (cb) => statusFanout(syncProvider).subscribe(cb),
     loadInitialContent: async () => {
@@ -124,7 +144,40 @@ export function createCollaborationContext(args: {
   };
 
   contentFlushRegistry.set(context, contentFlushes);
+  if (hostedComments) {
+    commentsCleanupRegistry.set(context, hostedComments.destroy);
+    hostedCommentsRegistry.set(context, hostedComments);
+  }
   return context;
+}
+
+const commentsCleanupRegistry = new WeakMap<CollaborationContext, () => void>();
+const hostedCommentsRegistry = new WeakMap<
+  CollaborationContext,
+  HostedCollaborationComments
+>();
+
+/**
+ * The host's own handle on this tab's comments — the panel source and the
+ * platform-only mutations behind the comments pane.
+ *
+ * Kept off `CollaborationContext` deliberately: the context is what an
+ * extension receives, and it must expose only `comments.service`. Undefined
+ * when this host cannot provide comment authority for the document.
+ */
+export function getHostedCollaborationComments(
+  collaboration: CollaborationContext,
+): HostedCollaborationComments | undefined {
+  return hostedCommentsRegistry.get(collaboration);
+}
+
+/** Release tab-scoped comment adapters, controller, and repository lease. */
+export function disposeCollaborationContext(
+  collaboration: CollaborationContext,
+): void {
+  const cleanup = commentsCleanupRegistry.get(collaboration);
+  commentsCleanupRegistry.delete(collaboration);
+  cleanup?.();
 }
 
 // ---------------------------------------------------------------------------
@@ -219,16 +272,6 @@ export function notifyCollabStatus(
 // Collab-enabled EditorHost factory
 // ---------------------------------------------------------------------------
 
-function pickCursorColor(seed: string): string {
-  const colors = [
-    '#E05555', '#2BA89A', '#3A8FD6', '#D97706',
-    '#9B59B6', '#E06B8F', '#3B82F6', '#16A34A',
-  ];
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
-  return colors[Math.abs(h) % colors.length];
-}
-
 export interface CollabExtensionHostArgs {
   filePath: string;
   fileName: string;
@@ -247,6 +290,15 @@ export interface CollabExtensionHostArgs {
   /** Inline collaborative embeds are always marked embedded + read-only. */
   embedded?: boolean;
   readOnly?: boolean;
+  /**
+   * Receives the editor's scroll viewport when it publishes one.
+   *
+   * Only surfaces that show several documents in sequence supply this -- today
+   * the feedback detail popover, which carries the reader's place from one
+   * design alternative to the next. Everywhere else the editor's registration
+   * is dropped, which is the same as never registering.
+   */
+  onViewportRegistered?: (viewport: EditorViewport | null) => void;
 }
 
 /**
@@ -275,6 +327,7 @@ export function createCollabExtensionHost(
     subscribeToThemeChanges,
     embedded = false,
     readOnly = false,
+    onViewportRegistered,
   } = args;
 
   const editorKey = makeEditorKey(filePath);
@@ -347,6 +400,17 @@ export function createCollabExtensionHost(
     setEditorContextItems(items: EditorContextItem[] | null): void {
       if (embedded) return;
       storeSetEditorContextItems(filePath, items);
+    },
+    /*
+     * Not gated on `embedded`, unlike its neighbours. Those guards exist to
+     * stop an inline embed from writing into surfaces that belong to the
+     * *tab* -- the AI context store, the editor API registry, both keyed by
+     * file path and both of which an embed would corrupt for whatever else has
+     * the same document open. A viewport goes nowhere but the caller that
+     * asked for it, and the surface that wants one is an embed by definition.
+     */
+    registerViewport(viewport: EditorViewport | null): void {
+      onViewportRegistered?.(viewport);
     },
     registerEditorAPI(api: unknown | null): void {
       if (embedded) return;

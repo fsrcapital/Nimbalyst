@@ -10,6 +10,11 @@ export type ChatSession = SessionData;
  * This is the single source of truth for session list/registry items.
  */
 export interface SessionMeta {
+  /** Provider log provenance for sessions followed or imported on this device. */
+  externalSource?: 'claude-code' | 'openai-codex';
+  externalLastActivityAt?: number;
+  /** Read-only desktop mirror; execution remains on this remote device. */
+  remoteHostDeviceId?: string;
   id: string;
   title: string;
   provider: string;
@@ -135,6 +140,8 @@ export interface SessionStore {
   create(payload: CreateSessionPayload): Promise<void>;
   updateMetadata(sessionId: string, metadata: UpdateSessionMetadataPayload): Promise<void>;
   get(sessionId: string): Promise<SessionData | null>;
+  /** Indexed, workspace-scoped lookup; rejects ambiguous provider resume handles. */
+  findByProviderSessionId?(provider: string, providerSessionId: string, workspaceId: string): Promise<SessionData | null>;
   /**
    * Batch fetch multiple sessions by IDs.
    * More efficient than calling get() multiple times.

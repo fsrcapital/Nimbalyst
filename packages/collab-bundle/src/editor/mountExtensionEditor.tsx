@@ -21,6 +21,7 @@ import type {
   EditorContextItem,
   EditorHost,
   EditorMenuItem,
+  EditorViewport,
   RevisionSnapshotAdapter,
 } from '@nimbalyst/extension-sdk/types/editor';
 import type { Doc } from 'yjs';
@@ -39,7 +40,13 @@ import type {
 } from './browserEditorCapabilities';
 import { resolveCollabEditorUser } from './presence';
 import { createCollabDocumentSession } from './session';
+import { deriveCollabEditorCommentsState } from './commenting';
+import {
+  createExtensionCommentsService,
+  type HostedExtensionComments,
+} from './extensionComments';
 import type {
+  CollabEditorCommentsOptions,
   CollabEditorFlushResult,
   CollabEditorPresence,
   CollabEditorSource,
@@ -78,6 +85,15 @@ export interface ExtensionEditorMountOptions {
   /** The extension's manifest permissions, so the host can answer them. */
   permissions?: BrowserExtensionPermissions;
 
+  /**
+   * The page's comment seam -- the same object the Lexical mount takes.
+   * Supplying it puts a `comments` service on the collaboration context the
+   * extension receives; omitting it leaves `collaboration.comments` absent, and
+   * an extension that offers commenting hides the affordance rather than
+   * simulating it locally.
+   */
+  comments?: CollabEditorCommentsOptions;
+
   readOnly?: boolean;
   theme?: string;
 
@@ -101,6 +117,32 @@ export interface ExtensionEditorMountOptions {
   onEditorContextItemsChange?(items: EditorContextItem[] | null): void;
   onRevisionAdapterChange?(adapter: RevisionSnapshotAdapter | null): void;
   openExternal?(url: string): Promise<void>;
+  onViewportRegistered?(viewport: EditorViewport | null): void;
+
+  /**
+   * Offer this document a raw-source view, granting the `sourceMode`
+   * capability. Only a page that has somewhere to render one and a codec that
+   * can project this document to text and back may set it.
+   *
+   * **The mount owns the flag, not the page.** Two things drive it -- the
+   * extension calling `host.toggleSourceMode()`, and the page's own control --
+   * and a second copy of the answer is a second copy that can be wrong. It also
+   * has to survive a page re-render, because the alternative shape (swap which
+   * component the page passes) makes the toggle a mount dependency, and a new
+   * `component` destroys a live Y.Doc behind a flush. The component this mount
+   * is given renders both modes and picks between them from
+   * `host.onSourceModeChanged`, so a toggle costs nothing but a React render.
+   */
+  enableSourceMode?: boolean;
+  /** Told whenever the mode changes, so the page can update its own chrome. */
+  onSourceModeChange?(active: boolean): void;
+
+  /**
+   * Render as an embed rather than a full page, so the extension drops chrome
+   * that only makes sense at page scale. An inline preview or a detail popover
+   * sets this; the document page does not.
+   */
+  embedded?: boolean;
 }
 
 export interface ExtensionEditorHandle {
@@ -128,6 +170,26 @@ export interface ExtensionEditorHandle {
   /** Wait for the room's persisted ack without draining bindings first. */
   flush(options?: { timeoutMs?: number }): Promise<CollabEditorFlushResult>;
   markClean(): void;
+  /**
+   * Re-publish comment capability to the mounted extension.
+   *
+   * The counterpart of `CollabEditorHandle.refreshCommentAccess`. `canComment`
+   * is answered by the page from a roster that resolves after this mount, so
+   * the first answer on a cold open is "not yet known" and the affordance is
+   * correctly absent; this is what makes it appear once the real answer lands.
+   */
+  refreshCommentAccess(): void;
+  /**
+   * Whether the raw-source view is showing. Always false for a mount that was
+   * not granted source mode.
+   */
+  isSourceModeActive(): boolean;
+  /**
+   * Drive the source view from the page's own control, the counterpart of the
+   * extension calling `host.toggleSourceMode()`. Both end up here, so the two
+   * can never disagree. A no-op when source mode was not granted.
+   */
+  setSourceMode(active: boolean): void;
   destroy(): void;
 }
 
@@ -178,12 +240,26 @@ export function mountExtensionEditor(
   // read-only demotion from inside its own construction, before there is a
   // host to tell.
   let notifyReadOnlyChanged: (readOnly: boolean) => void = () => {};
+  // Same reason, and the same guard: the session reports its first status from
+  // inside its own construction, before this has been built.
+  let hostedComments: HostedExtensionComments | null = null;
+  let sourceModeActive = false;
+  const sourceModeListeners = new Set<(active: boolean) => void>();
+  const setSourceMode = (active: boolean): void => {
+    if (destroyed || !options.enableSourceMode || sourceModeActive === active) return;
+    sourceModeActive = active;
+    for (const listener of sourceModeListeners) listener(active);
+    options.onSourceModeChange?.(active);
+  };
+
+  const hostCanComment = (): boolean => options.comments?.canComment?.() ?? true;
 
   const session = createCollabDocumentSession({
     source: options.source,
     memberId: resolvedUser.memberId,
     readOnly: options.readOnly,
     lifecycleElement: options.element,
+    hostCanComment,
     onStateChange: options.onStateChange,
     onPresenceChange: (presence) => options.onPresenceChange?.(presence),
     onWriteRejected: options.onWriteRejected,
@@ -193,12 +269,16 @@ export function mountExtensionEditor(
     onStatusChange: () => {
       const status = statusFromState(session.getState());
       for (const listener of statusListeners) listener(status);
+      // Hydration and comment capability both move with the connection, and an
+      // extension subscribed to the comments service is otherwise not told.
+      hostedComments?.notifyCapabilitiesChanged();
     },
     onSurfaceInvalidated: () => {
       // Effective read-only can change without any user action: the server can
       // demote a writer mid-session. The extension is told through the host it
       // already holds, so nothing has to remount.
       notifyReadOnlyChanged(session.getState().readOnly);
+      hostedComments?.notifyCapabilitiesChanged();
     },
   });
 
@@ -216,8 +296,38 @@ export function mountExtensionEditor(
     heartbeatIntervalMs: 0,
   });
 
+  // Built only when the page supplied a comment seam. Everything it needs --
+  // who the author is, who can be mentioned, whether this role may comment at
+  // all -- comes from the page's authenticated session; there is no honest way
+  // to synthesize any of it here, so the absent case stays absent.
+  const commentsOptions = options.comments;
+  hostedComments = commentsOptions
+    ? createExtensionCommentsService({
+      yDoc: session.sharedDocument,
+      host: {
+        currentUser: commentsOptions.currentUser,
+        documentId: commentsOptions.documentId,
+        documentTitle: commentsOptions.documentTitle,
+        documentUri: commentsOptions.documentUri,
+        // Two tabs on one document must not share anchor registrations.
+        instanceId: `${commentsOptions.documentUri}#${crypto.randomUUID()}`,
+        getMembers: () => commentsOptions.getMembers(),
+        getCapabilities: () => deriveCollabEditorCommentsState({
+          connection: session.getState().connection,
+          serverAccess: session.getState().serverAccess,
+          hasConnectedOnce: session.hasConnectedOnce(),
+          hostCanComment: hostCanComment(),
+        }).capabilities,
+        isHydrated: () => session.hasConnectedOnce(),
+        onMention: commentsOptions.onMention,
+        onReply: commentsOptions.onReply,
+      },
+    })
+    : null;
+
   const collaboration = createBrowserCollaborationContext({
     yDoc: session.sharedDocument,
+    ...(hostedComments ? { comments: hostedComments.service } : {}),
     awareness: awarenessBridge.awareness,
     user: {
       id: resolvedUser.memberId,
@@ -268,6 +378,20 @@ export function mountExtensionEditor(
     onEditorContextChange: options.onEditorContextChange,
     onEditorContextItemsChange: options.onEditorContextItemsChange,
     openExternal: options.openExternal,
+    onViewportRegistered: options.onViewportRegistered,
+    // Supplying `toggleSourceMode` is the grant, so it stays undefined unless
+    // the page asked for it -- the capability table reads exactly this.
+    toggleSourceMode: options.enableSourceMode
+      ? () => setSourceMode(!sourceModeActive)
+      : undefined,
+    isSourceModeActive: () => sourceModeActive,
+    subscribeToSourceModeChanges: (callback) => {
+      sourceModeListeners.add(callback);
+      return () => {
+        sourceModeListeners.delete(callback);
+      };
+    },
+    embedded: options.embedded,
     onCapabilityRefused: options.onCapabilityRefused,
   });
   notifyReadOnlyChanged = (readOnly) => browserHost.notifyReadOnlyChanged(readOnly);
@@ -306,10 +430,15 @@ export function mountExtensionEditor(
     flushContent: () => flushBrowserCollaborativeContent(collaboration),
     flush: (flushOptions) => session.flush(flushOptions),
     markClean: () => session.markClean(),
+    refreshCommentAccess: () => hostedComments?.notifyCapabilitiesChanged(),
+    isSourceModeActive: () => sourceModeActive,
+    setSourceMode: (active) => setSourceMode(active),
     destroy() {
       if (destroyed) return;
       destroyed = true;
       statusListeners.clear();
+      sourceModeListeners.clear();
+      hostedComments?.destroy();
       session.destroy({
         beforeTransportTeardown: () => {
           root?.unmount();

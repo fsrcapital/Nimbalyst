@@ -15,6 +15,7 @@
 import type { Doc as YDoc } from 'yjs';
 import type { Awareness } from 'y-protocols/awareness';
 import type { ExtensionStorage } from './panel.js';
+import type { CollaborationCommentsService } from './comments.js';
 /**
  * Connection status of a collaborative session.
  *
@@ -85,6 +86,12 @@ export interface CollaborationContext {
         name: string;
         color: string;
     };
+    /**
+     * Host-owned collaborative comments for this document. Absent when the host
+     * cannot provide live authorization, hydration, identity, and notification
+     * routing for the capability.
+     */
+    readonly comments?: CollaborationCommentsService;
     /** Current connection status. */
     getStatus(): CollaborationStatus;
     /** Subscribe to status changes. Returns an unsubscribe fn. */
@@ -236,6 +243,8 @@ export type EditorHostCapability =
  | 'history'
 /** `openExternal` opens a URL outside the app. */
  | 'externalLinks'
+/** `getAssetUrl` returns a URL the renderer can load the document from. */
+ | 'assetUrls'
 /** Source-mode toggle (`toggleSourceMode` and friends). */
  | 'sourceMode'
 /** AI diff review (`onDiffRequested` and friends). */
@@ -246,6 +255,8 @@ export type EditorHostCapability =
  | 'aiContext'
 /** `registerEditorAPI` publishes the editor to AI tools. */
  | 'editorApi'
+/** `registerViewport` reaches a host that carries scroll between documents. */
+ | 'viewport'
 /** `registerMenuItems` reaches a real actions menu. */
  | 'menuItems'
 /** `storage` survives a reload. */
@@ -273,6 +284,22 @@ export interface EditorHostCapabilities {
     supports(capability: EditorHostCapability): boolean;
     /** Every capability this host cannot provide, each with a reason. */
     readonly unavailable: readonly EditorHostCapabilityGap[];
+}
+/**
+ * An editor's scroll position, expressed so it survives the trip to a document
+ * of a different length. See {@link EditorHost.registerViewport}.
+ *
+ * A **fraction of scrollable height**, never a pixel offset. Two variants of a
+ * screen are rarely the same length, and 2000px down a 2400px design is near
+ * the end of it while 2000px down a 9000px design is barely started. Carrying
+ * pixels would land the reader somewhere arbitrary, and nothing on screen would
+ * say why.
+ */
+export interface EditorViewport {
+    /** Current position in `[0, 1]`. Content with nowhere to scroll returns 0. */
+    getScrollFraction(): number;
+    /** Restore a position captured from a document of any length. */
+    setScrollFraction(fraction: number): void;
 }
 /**
  * Context that an editor pushes to the chat panel.
@@ -540,6 +567,29 @@ export interface EditorHost {
      */
     openExternal?(url: string): Promise<void>;
     /**
+     * A URL the renderer can load this document from directly, for editors whose
+     * element wants to fetch the bytes itself rather than be handed them.
+     *
+     * `loadBinaryContent` is the right call for a format you parse in full -- a
+     * PDF, a spreadsheet. It is the wrong call for anything streamed: a `<video>`
+     * pointed at a blob built from a whole-file ArrayBuffer pulls a multi-gigabyte
+     * screen recording through IPC and into renderer memory before the first frame
+     * paints. Handing the element a URL instead lets the host serve byte ranges,
+     * so playback starts immediately and seeking costs one range request.
+     *
+     * The returned URL is same-origin to the renderer and readable only by this
+     * app; it is not a `file://` path and must not be treated as one. Hosts that
+     * have no such URL to give -- read-only, embedded, and offscreen hosts, and
+     * any document not backed by a local file -- omit this method.
+     *
+     * @example
+     * ```tsx
+     * const src = host.getAssetUrl?.();
+     * return src ? <video src={src} controls /> : <p>Preview unavailable.</p>;
+     * ```
+     */
+    getAssetUrl?(): string | null;
+    /**
      * Subscribe to diff mode requests.
      * Called when AI edits are pending review.
      * Only implement if editor supports diff display.
@@ -687,6 +737,43 @@ export interface EditorHost {
      * ```
      */
     registerEditorAPI(api: unknown | null): void;
+    /**
+     * Publish this editor's scroll position, so a host showing several documents
+     * in sequence can carry the reader's place from one to the next.
+     *
+     * The case this exists for: comparing design alternatives. Open option A,
+     * scroll to the pricing table, step to option B, and land on B's pricing
+     * table. Without it, stepping between options is three separate lookups and
+     * the reader is comparing against memory again.
+     *
+     * The host cannot do this itself. An editor that paints into an iframe --
+     * which every mockup does -- owns a scroll position in a document the host
+     * has no business reaching into, and an editor that scrolls a `<div>` owns
+     * one the host cannot find. Only the editor knows what scrolls.
+     *
+     * Optional on both sides, and silence is a supported answer: an editor that
+     * never calls this simply does not carry scroll, and each document opens at
+     * the top. Call with `null` to unregister, as with `registerEditorAPI`.
+     *
+     * @example
+     * ```tsx
+     * useEffect(() => {
+     *   host.registerViewport?.({
+     *     getScrollFraction: () => {
+     *       const doc = iframeRef.current?.contentDocument?.documentElement;
+     *       if (!doc) return 0;
+     *       return scrollFractionOf(doc.scrollTop, doc.scrollHeight - doc.clientHeight);
+     *     },
+     *     setScrollFraction: (fraction) => {
+     *       const doc = iframeRef.current?.contentDocument?.documentElement;
+     *       if (doc) doc.scrollTop = fraction * (doc.scrollHeight - doc.clientHeight);
+     *     },
+     *   });
+     *   return () => host.registerViewport?.(null);
+     * }, [host]);
+     * ```
+     */
+    registerViewport?(viewport: EditorViewport | null): void;
     /**
      * Present only when this document was opened collaboratively.
      *

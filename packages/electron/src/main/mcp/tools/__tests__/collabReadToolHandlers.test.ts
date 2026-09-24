@@ -8,6 +8,13 @@ import {
 } from '../collabReadToolHandlers';
 import type { TeamDetails, TeamMember } from '../../../services/TeamService';
 
+vi.mock('../../../services/TeamService', () => ({
+  findTeamForWorkspace: vi.fn(async () => null),
+  resolveTeamForWorkspace: vi.fn(async () => ({ team: null, complete: false })),
+  getOrgScopedJwt: vi.fn(),
+  listMembersWithTeamJwt: vi.fn(),
+}));
+
 const TEAM = {
   orgId: 'org-design',
   name: 'Design Team',
@@ -19,6 +26,10 @@ function member(memberId: string, name: string, email: string): TeamMember {
 }
 
 describe('collaboration read tools', () => {
+  it('reports unavailable discovery instead of telling the assistant the workspace has no organization', async () => {
+    await expect(loadOrgDirectory('/workspace/design', undefined)).rejects.toThrow('Organization directory is unavailable');
+  });
+
   it('keeps ambiguous name matches distinguishable from a missing person', () => {
     const roster = [
       member('member-karl-one', 'Karl Jones', 'karl.jones@example.test'),
@@ -65,7 +76,10 @@ describe('readResourceSharingStatus', () => {
   }
 
   it('resolves a relative file sourceId against the workspace before looking up its binding', async () => {
-    const findLinkedDocument = vi.fn(async (_workspacePath: string, _sourceFilePath: string) => ({ orgId: 'org-design' }));
+    const findLinkedDocument = vi.fn(async (_workspacePath: string, _sourceFilePath: string) => ({
+      orgId: 'org-design',
+      documentId: 'doc-spec',
+    }));
     const deps = sharingDeps({ findLinkedDocument });
 
     const relative = await readResourceSharingStatus('file', 'docs/spec.md', '/workspace/design', deps);
@@ -77,7 +91,15 @@ describe('readResourceSharingStatus', () => {
       '/workspace/design/docs/spec.md',
       '/workspace/design/docs/spec.md',
     ]);
-    expect(relative).toMatchObject({ teamVisible: true, orgId: 'org-design', reason: 'shared' });
+    // The document id rides along because a `file` ref is only meaningful on
+    // the machine that reported it; a caller handing the resource to someone
+    // else has nothing else to name it by.
+    expect(relative).toMatchObject({
+      teamVisible: true,
+      orgId: 'org-design',
+      documentId: 'doc-spec',
+      reason: 'shared',
+    });
   });
 
   it('reports an unbound file as not shared', async () => {

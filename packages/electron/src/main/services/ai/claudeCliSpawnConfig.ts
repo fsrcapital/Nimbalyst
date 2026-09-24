@@ -18,7 +18,7 @@
  */
 
 import { ModelIdentifier } from '@nimbalyst/runtime/ai/server/types';
-import { normalizeClaudeCodeVariant } from '@nimbalyst/runtime/ai/modelConstants';
+import { normalizeClaudeCodeVariant, CLAUDE_CODE_PINNED_SDK_MODELS } from '@nimbalyst/runtime/ai/modelConstants';
 
 /**
  * Resolve a Nimbalyst model id to the alias the genuine `claude` CLI accepts for
@@ -48,8 +48,8 @@ export function resolveClaudeCliModelArg(model: string | undefined): string | un
 
   const variant = normalizeClaudeCodeVariant(variantInput);
   if (variant) {
-    // Collapse pinned opus variants (opus-4-7 / opus-4-6) to the CLI's `opus` alias.
-    const alias = variant.startsWith('opus') ? 'opus' : variant;
+    // Share the SDK mapping so explicit versions never collapse to "latest".
+    const alias = CLAUDE_CODE_PINNED_SDK_MODELS[variant] ?? variant;
     return isExtended ? `${alias}[1m]` : alias;
   }
 

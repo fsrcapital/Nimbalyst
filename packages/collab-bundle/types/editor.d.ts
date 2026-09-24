@@ -1,9 +1,10 @@
 import type { Binding, Provider, ProviderAwareness } from '@lexical/yjs';
 import type { Klass, LexicalEditor, LexicalNode, TextFormatType } from 'lexical';
-import type { ComponentType } from 'react';
+import type { ComponentType, ReactNode } from 'react';
 import type { Awareness } from 'y-protocols/awareness';
 import type { Doc } from 'yjs';
 import type { TeamJwt, TeamMemberId } from './internal/runtime/src/auth/jwtScopes';
+import type { TrackerReferenceResolver } from './internal/collab-client/src/trackers-ui/references/index';
 import type {
   CollaborationContext,
   CollaborationStatus,
@@ -14,6 +15,7 @@ import type {
   EditorHostCapability,
   EditorHostCapabilityGap,
   EditorMenuItem,
+  EditorViewport,
   RevisionSnapshotAdapter,
 } from './internal/extension-sdk/src/types/editor';
 
@@ -199,6 +201,13 @@ export interface CollabEditorMountOptions {
   user: CollabEditorUser;
   readOnly?: boolean;
   comments?: CollabEditorCommentsOptions;
+  renderDecisionArtifact?: (entryId: string, artifact: string) => ReactNode;
+  /**
+   * Live data for tracker references in the document. Without it references
+   * render as key-only chips; with it they show live title and status, and
+   * card and statements references render their full views.
+   */
+  trackerReferences?: TrackerReferenceResolver;
   onStateChange?(state: CollabEditorState): void;
   onPresenceChange?(presence: CollabEditorPresence): void;
   onWriteRejected?(rejection: CollabEditorWriteRejection): void;
@@ -215,6 +224,7 @@ export interface CollabEditorMountOptions {
 }
 
 export interface CollabEditorHandle {
+  hasPendingWrites?(): boolean;
   getDocument(): Doc;
   getMarkdown(): string;
   getState(): CollabEditorState;
@@ -402,6 +412,7 @@ export type {
   EditorHostCapabilityGap,
   EditorHostProps,
   EditorMenuItem,
+  EditorViewport,
   RevisionSnapshotAdapter,
 } from './internal/extension-sdk/src/types/editor';
 
@@ -426,6 +437,8 @@ export interface BrowserEditorGrantedCapabilities {
   aiContext?: boolean;
   binaryContent?: boolean;
   externalLinks?: boolean;
+  viewport?: boolean;
+  sourceMode?: boolean;
 }
 
 export declare function createBrowserEditorCapabilities(
@@ -517,6 +530,16 @@ export interface BrowserExtensionEditorHostOptions {
   onEditorContextItemsChange?(items: EditorContextItem[] | null): void;
   onEditorAPIChange?(api: unknown | null): void;
   openExternal?(url: string): Promise<void>;
+  onViewportRegistered?(viewport: EditorViewport | null): void;
+  /**
+   * Supplying `toggleSourceMode` grants the `sourceMode` capability. All three
+   * move together: a host that can toggle but cannot report the current state
+   * leaves an editor showing a stale toggle label.
+   */
+  toggleSourceMode?(): void;
+  isSourceModeActive?(): boolean;
+  subscribeToSourceModeChanges?(callback: (active: boolean) => void): () => void;
+  embedded?: boolean;
   onCapabilityRefused?(error: BrowserEditorCapabilityError): void;
 }
 
@@ -560,6 +583,12 @@ export interface ExtensionEditorMountOptions {
   initialContent?: string;
   initialBinaryContent?: ArrayBuffer;
   permissions?: BrowserExtensionPermissions;
+  /**
+   * The page's comment seam, the same object `mountCollabEditor` takes.
+   * Supplying it puts a `comments` service on the collaboration context the
+   * extension receives; omitting it leaves `collaboration.comments` absent.
+   */
+  comments?: CollabEditorCommentsOptions;
   readOnly?: boolean;
   theme?: string;
   onStateChange?(state: CollabEditorState): void;
@@ -580,6 +609,16 @@ export interface ExtensionEditorMountOptions {
   onEditorContextItemsChange?(items: EditorContextItem[] | null): void;
   onRevisionAdapterChange?(adapter: RevisionSnapshotAdapter | null): void;
   openExternal?(url: string): Promise<void>;
+  onViewportRegistered?(viewport: EditorViewport | null): void;
+  /**
+   * Offer this document a raw-source view, granting the `sourceMode`
+   * capability. The mount owns the flag so the extension's
+   * `host.toggleSourceMode()` and the page's own control cannot disagree, and
+   * so a toggle is a React render rather than a remount.
+   */
+  enableSourceMode?: boolean;
+  onSourceModeChange?(active: boolean): void;
+  embedded?: boolean;
 }
 
 export interface ExtensionEditorHandle {
@@ -598,6 +637,12 @@ export interface ExtensionEditorHandle {
   flushContent(): Promise<boolean>;
   flush(options?: { timeoutMs?: number }): Promise<CollabEditorFlushResult>;
   markClean(): void;
+  /** Re-publish comment capability to the mounted extension. */
+  refreshCommentAccess(): void;
+  /** Whether the raw-source view is showing. False when it was not granted. */
+  isSourceModeActive(): boolean;
+  /** Drive the source view from the page's control. No-op when not granted. */
+  setSourceMode(active: boolean): void;
   destroy(): void;
 }
 
@@ -611,3 +656,13 @@ export declare function mountExtensionEditor(
 ): ExtensionEditorHandle;
 
 export type { TextFormatType };
+export type { TrackerReferenceResolver };
+export {
+  LiveTrackerReferenceRenderer,
+  TrackerReferenceChipView,
+  TrackerReferenceResolverProvider,
+} from './internal/collab-client/src/trackers-ui/references/index';
+export type {
+  LiveTrackerReferenceRendererProps,
+  TrackerReferenceViewKind,
+} from './internal/collab-client/src/trackers-ui/references/index';

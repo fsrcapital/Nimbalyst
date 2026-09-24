@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type { TextFormatType } from 'lexical';
 import {
   asTeamJwt,
@@ -11,6 +12,7 @@ import type {
   CommentReplyPayload,
 } from '@nimbalyst/runtime/editor/commenting/types';
 import type { TeamMemberSummary } from '@nimbalyst/collab-client/core';
+import type { TrackerReferenceResolver } from '@nimbalyst/collab-client/trackers-ui/references';
 import type { Doc } from 'yjs';
 
 declare const teamOrgIdBrand: unique symbol;
@@ -178,6 +180,20 @@ export interface CollabEditorMountOptions {
   user: CollabEditorUser;
   readOnly?: boolean;
   comments?: CollabEditorCommentsOptions;
+  /** Optional live preview supplied by the document host; never resolves local files itself. */
+  renderDecisionArtifact?: (entryId: string, artifact: string) => ReactNode;
+  /**
+   * Live data for tracker references in the document. Without it references
+   * render as key-only chips; with it they show live title and status, and
+   * card and statements references render their full views.
+   */
+  trackerReferences?: TrackerReferenceResolver;
+  /**
+   * How inline references render in prose. `'chip'` (the default) is the
+   * bordered key-and-title pill; `'quiet'` is the title as a kind-tinted link
+   * with key, kind and state in a hover peek. Presentation only.
+   */
+  trackerReferenceAppearance?: 'chip' | 'quiet';
   onStateChange?: (state: CollabEditorState) => void;
   onPresenceChange?: (presence: CollabEditorPresence) => void;
   onWriteRejected?: (rejection: CollabEditorWriteRejection) => void;
@@ -196,6 +212,8 @@ export interface CollabEditorMountOptions {
 
 export interface CollabEditorHandle {
   getDocument(): Doc;
+  /** True until local document writes have server acknowledgement. */
+  hasPendingWrites?(): boolean;
   getMarkdown(): string;
   getState(): CollabEditorState;
   getPresence(): CollabEditorPresence;
@@ -223,6 +241,7 @@ export interface CollabEditorHandle {
 
 export type {
   CommentMember,
+  TrackerReferenceResolver,
   TeamJwt,
   TeamMemberId,
   TextFormatType,

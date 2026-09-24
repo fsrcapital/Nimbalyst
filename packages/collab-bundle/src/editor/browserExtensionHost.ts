@@ -21,6 +21,7 @@
  * has no document at all, so the factory requires it.
  */
 
+import type { CollaborationCommentsService } from '@nimbalyst/extension-sdk/types/comments';
 import type {
   CollaborationContext,
   CollaborationStatus,
@@ -28,6 +29,7 @@ import type {
   EditorContextItem,
   EditorHost,
   EditorMenuItem,
+  EditorViewport,
   RevisionSnapshotAdapter,
 } from '@nimbalyst/extension-sdk/types/editor';
 import type { ExtensionStorage } from '@nimbalyst/extension-sdk/types/panel';
@@ -67,6 +69,13 @@ export interface BrowserCollaborationContextOptions {
   hasUndecodedContent?(): boolean;
   reportSeedOutcome?(outcome: { ok: boolean; error?: unknown }): void;
   onRevisionAdapterChange?(adapter: RevisionSnapshotAdapter | null): void;
+  /**
+   * Host-owned collaborative comments. Omitted -- not stubbed -- when the
+   * embedding page cannot answer identity, roster and comment permission from
+   * its own authenticated session, which is how extensions feature-detect the
+   * capability. See `extensionComments.ts`.
+   */
+  comments?: CollaborationCommentsService;
 }
 
 /**
@@ -92,6 +101,7 @@ export function createBrowserCollaborationContext(
     flushWithAck: (timeoutMs) => options.flushWithAck(timeoutMs),
     hasUndecodedContent: () => options.hasUndecodedContent?.() ?? false,
     reportSeedOutcome: (outcome) => options.reportSeedOutcome?.(outcome),
+    ...(options.comments ? { comments: options.comments } : {}),
     registerRevisionAdapter: (adapter) => {
       currentAdapter = adapter;
       options.onRevisionAdapterChange?.(adapter);
@@ -176,6 +186,38 @@ export interface BrowserExtensionEditorHostOptions {
   openExternal?(url: string): Promise<void>;
 
   /**
+   * Receives the editor's scroll viewport when it publishes one.
+   *
+   * Only a page that shows several documents in sequence supplies this -- the
+   * feedback detail popover, carrying the reader's place from one design
+   * alternative to the next. Absent means the `viewport` capability is absent,
+   * so an extension that checks before registering gets a straight answer.
+   */
+  onViewportRegistered?(viewport: EditorViewport | null): void;
+
+  /**
+   * Flips the document between the extension's editor and a raw-source view.
+   *
+   * Supplying it is what grants the `sourceMode` capability, so a page offers
+   * it only when it can honour it: somewhere to render a source editor, and a
+   * codec that can project this document's Y.Doc to text and read the text
+   * back. The other two members are read through this same grant -- a host
+   * that can toggle but cannot report the current state would leave every
+   * editor built on `useEditorLifecycle` showing a stale toggle label.
+   */
+  toggleSourceMode?(): void;
+  isSourceModeActive?(): boolean;
+  subscribeToSourceModeChanges?(callback: (active: boolean) => void): () => void;
+
+  /**
+   * Marks the editor as rendered inside another surface rather than as a full
+   * page, so extensions can drop persistent chrome that makes no sense there.
+   * An inline preview or a detail popover sets this; the document page does
+   * not.
+   */
+  embedded?: boolean;
+
+  /**
    * Called whenever the editor reaches for something this host declared
    * unavailable. The host still throws/rejects; this is the page's hook for
    * logging it, because a rejection inside an extension's effect is otherwise
@@ -215,6 +257,8 @@ export function createBrowserExtensionEditorHost(
     ),
     binaryContent: Boolean(options.getInitialBinaryContent),
     externalLinks: Boolean(options.openExternal),
+    viewport: Boolean(options.onViewportRegistered),
+    sourceMode: Boolean(options.toggleSourceMode),
   });
   const filesystemPermission = resolveBrowserFilesystemPermission(options.permissions);
 
@@ -269,7 +313,7 @@ export function createBrowserExtensionEditorHost(
 
     filePath: options.filePath,
     fileName: options.fileName,
-    embedded: false,
+    embedded: options.embedded ?? false,
     get theme() {
       return options.getTheme?.() ?? 'auto';
     },
@@ -350,10 +394,22 @@ export function createBrowserExtensionEditorHost(
       options.onOpenHistory();
     },
 
-    // `fs`, `openExternal`, the diff members, the source-mode members,
-    // `onFindRequested` and `getConfig` are omitted, not stubbed -- absence is
-    // how an extension detects them. `openExternal` is added below only when
-    // the page supplied one.
+    // `fs`, `openExternal`, the diff members, `onFindRequested` and `getConfig`
+    // are omitted, not stubbed -- absence is how an extension detects them.
+    // `openExternal` is added below only when the page supplied one.
+
+    // Source mode, present only when the page granted it. All four members
+    // move together: `supportsSourceMode` is what puts a "View source" control
+    // on screen, and an editor that sees it must be able to act on it.
+    ...(options.toggleSourceMode
+      ? {
+        supportsSourceMode: true,
+        toggleSourceMode: () => options.toggleSourceMode?.(),
+        isSourceModeActive: () => options.isSourceModeActive?.() ?? false,
+        onSourceModeChanged: (callback: (active: boolean) => void) =>
+          options.subscribeToSourceModeChanges?.(callback) ?? (() => {}),
+      }
+      : {}),
 
     storage,
 
@@ -375,6 +431,14 @@ export function createBrowserExtensionEditorHost(
     registerEditorAPI(api) {
       editorAPI = api;
       options.onEditorAPIChange?.(api);
+    },
+
+    registerViewport(viewport) {
+      if (!options.onViewportRegistered) {
+        refuse('viewport');
+        return;
+      }
+      options.onViewportRegistered(viewport);
     },
 
     registerMenuItems(items) {

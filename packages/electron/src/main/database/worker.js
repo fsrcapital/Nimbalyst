@@ -22,6 +22,23 @@ const inspector = require('node:inspector');
 const { performance } = require('node:perf_hooks');
 const { serializeWorkerError } = require('./workerErrorSerialization');
 const { planInitFailureResponse } = require('./pgliteInitRecovery');
+const { runTransactionStatements } = require('./transactionStatements');
+
+/**
+ * The install's database root, or null when the spawner did not supply one.
+ *
+ * Null is legitimate for a throwaway worker that only answers `verifyBackup`
+ * at an explicit path -- it never opens the live store, so it needs no root.
+ * It is NOT legitimate for `initialize`, which refuses below with a message
+ * naming the cause.
+ *
+ * This used to be `workerData.userDataPath` read straight into the constructor,
+ * so a spawn without `workerData` threw a bare `TypeError: Cannot read
+ * properties of undefined` before the message handler was installed. The parent
+ * saw a thread that died for no stated reason. Read it once, defensively, and
+ * make the one operation that actually needs it say so.
+ */
+const workerUserDataPath = (workerData && workerData.userDataPath) || null;
 
 // ---------------------------------------------------------------------------
 // CPU profile auto-capture for the PGLite worker.
@@ -60,7 +77,8 @@ async function capturePgliteWorkerCpuProfile(triggerElu) {
     const { profile } = await post('Profiler.stop');
 
     const fs = require('fs').promises;
-    const logsDir = path.join(workerData.userDataPath, 'logs');
+    if (!workerUserDataPath) return;
+    const logsDir = path.join(workerUserDataPath, 'logs');
     await fs.mkdir(logsDir, { recursive: true });
     const filename = `cpu-pglite-worker-${new Date().toISOString().replace(/[:.]/g, '-')}.cpuprofile`;
     const fullPath = path.join(logsDir, filename);
@@ -107,9 +125,11 @@ const WAL_CHECK_INTERVAL_MS = 60 * 1000;
 class PGLiteWorker {
   constructor() {
     this.db = null;
-    this.dataDir = path.join(workerData.userDataPath, 'pglite-db');
+    this.dataDir = workerUserDataPath ? path.join(workerUserDataPath, 'pglite-db') : null;
     // Our own lock file with actual PID - separate from PGLite's postmaster.pid
-    this.lockFilePath = path.join(workerData.userDataPath, 'nimbalyst-db.pid');
+    this.lockFilePath = workerUserDataPath
+      ? path.join(workerUserDataPath, 'nimbalyst-db.pid')
+      : null;
     // Counter of in-flight query/exec calls; the WAL maintenance check skips
     // when this is non-zero so a CHECKPOINT can never run during a user query
     // (--single mode serializes them anyway, but skipping avoids visibly long blocks).
@@ -413,6 +433,15 @@ class PGLiteWorker {
   async initialize(message) {
     const initStartTime = performance.now();
     console.log('[PGLite Worker] initialize() called, existing db:', !!this.db, 'dataDir:', this.dataDir);
+
+    // The one operation that genuinely needs the root. Saying so beats the
+    // `TypeError` the constructor used to throw before anything was listening.
+    if (!this.dataDir) {
+      throw new Error(
+        'PGLite worker was spawned without workerData.userDataPath, so it has no data directory '
+        + 'to open. Spawn it with `new Worker(bundle, { workerData: { userDataPath } })`.',
+      );
+    }
 
     if (this.db) {
       console.log('[PGLite Worker] Database already initialized - returning early');
@@ -1211,7 +1240,6 @@ class PGLiteWorker {
 
             CREATE INDEX IF NOT EXISTS idx_tracker_type ON tracker_items(type);
             CREATE INDEX IF NOT EXISTS idx_tracker_workspace ON tracker_items(workspace);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_tracker_workspace_issue_number ON tracker_items(workspace, issue_number) WHERE issue_number IS NOT NULL;
             CREATE UNIQUE INDEX IF NOT EXISTS idx_tracker_workspace_issue_key ON tracker_items(workspace, issue_key) WHERE issue_key IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_tracker_status ON tracker_items(status);
             CREATE INDEX IF NOT EXISTS idx_tracker_created ON tracker_items(created);
@@ -1280,9 +1308,17 @@ class PGLiteWorker {
           ALTER TABLE tracker_items ADD COLUMN issue_key TEXT;
         `);
       }
-      // Always ensure indexes exist (covers both new DBs and migrated DBs)
+      // Always ensure indexes exist (covers both new DBs and migrated DBs).
+      //
+      // The dropped one declared UNIQUE(workspace, issue_number). The issue KEY
+      // carries the room's prefix and the number does not, so a workspace whose
+      // prefix changed legitimately holds NIM-42 and NIMA-42 and that index
+      // called the second a duplicate -- which stranded the incoming item with
+      // no key at all. issue_key already carries the correct constraint below,
+      // and nothing in the app queries by issue_number. See SQLite migration
+      // 0039 for the same drop on the other backend.
       await this.db.exec(`
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_tracker_workspace_issue_number ON tracker_items(workspace, issue_number) WHERE issue_number IS NOT NULL;
+        DROP INDEX IF EXISTS idx_tracker_workspace_issue_number;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_tracker_workspace_issue_key ON tracker_items(workspace, issue_key) WHERE issue_key IS NOT NULL;
       `);
     } catch (error) {
@@ -1557,6 +1593,18 @@ class PGLiteWorker {
       console.error('[PGLite Worker] Failed to create tracker_body_cache table:', error);
       throw error;
     }
+
+    await this.db.exec(`
+      CREATE TABLE IF NOT EXISTS tracker_creation_receipts (
+        item_id TEXT PRIMARY KEY REFERENCES tracker_items(id) ON DELETE CASCADE,
+        workspace TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        publication_status TEXT NOT NULL,
+        error TEXT,
+        updated TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_tracker_creation_workspace ON tracker_creation_receipts(workspace, publication_status);
+    `);
 
     // Offline transaction queue. Linear's four-state model (D6):
     //   created -> queued -> executing -> persistedEnqueue.
@@ -1890,6 +1938,32 @@ class PGLiteWorker {
       console.log('[PGLite Worker] display_name column added to worktrees');
     } catch (error) {
       console.error('[PGLite Worker] Failed to add display_name column:', error);
+      throw error;
+    }
+
+    // Add source_folder_path column to worktrees (migration)
+    //
+    // Which root of a multi-root workspace the worktree was branched from.
+    // `workspace_id` is the workspace's PRIMARY root and stays the identity
+    // anchor, so it no longer answers "which repository did this come from"
+    // once a workspace spans folders. Backfilled to `workspace_id`: every
+    // worktree created before multi-root came from the primary root.
+    try {
+      await this.db.exec(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'worktrees' AND column_name = 'source_folder_path'
+          ) THEN
+            ALTER TABLE worktrees ADD COLUMN source_folder_path TEXT;
+            UPDATE worktrees SET source_folder_path = workspace_id WHERE source_folder_path IS NULL;
+          END IF;
+        END $$;
+      `);
+      console.log('[PGLite Worker] source_folder_path column added to worktrees');
+    } catch (error) {
+      console.error('[PGLite Worker] Failed to add source_folder_path column:', error);
       throw error;
     }
 
@@ -2612,6 +2686,191 @@ class PGLiteWorker {
       throw error;
     }
 
+    // Migration: append-only tracker item revision log (knowledge-scopes
+    // contract 4.2). Revision identity is a UUID; the only sequential number
+    // (`server_revision`) is assigned by the room on sync, never locally.
+    // Mirror of SQLite migration
+    // schemas/0045_tracker_item_revisions.sql and 0047_tracker_item_revision_scope.sql -- keep them in sync,
+    // including the publication CASE and the actor COALESCE order.
+    //
+    // A trigger rather than a hook in TrackerPGLiteStore because the store is
+    // one of a dozen writers of tracker_items; the native publish path is one
+    // of the others. See the SQLite migration's header for the full rationale.
+    //
+    // This runs after the sync_status/sync_id ALTERs above, which the trigger
+    // reads. A failure here logs and continues: SQLite is the primary backend
+    // now and no existing feature depends on this table, so bricking startup
+    // for a legacy install would be the worse outcome.
+    try {
+      await this.db.exec(`
+        CREATE TABLE IF NOT EXISTS tracker_item_revisions (
+          revision_id        TEXT PRIMARY KEY,
+          item_id            TEXT NOT NULL,
+          parent_revision_id TEXT,
+          server_revision    INTEGER,
+          workspace          TEXT NOT NULL,
+          data               JSONB NOT NULL,
+          actor              JSONB,
+          published          BOOLEAN,
+          sync_status        TEXT,
+          sync_id            INTEGER,
+          deleted_at         TIMESTAMPTZ,
+          recorded_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        ALTER TABLE tracker_item_revisions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+        CREATE INDEX IF NOT EXISTS idx_tracker_item_revisions_item
+          ON tracker_item_revisions (workspace, item_id, recorded_at);
+        CREATE INDEX IF NOT EXISTS idx_tracker_item_revisions_item_parent
+          ON tracker_item_revisions (item_id, parent_revision_id);
+        CREATE INDEX IF NOT EXISTS idx_tracker_item_revisions_parent
+          ON tracker_item_revisions (parent_revision_id) WHERE parent_revision_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tracker_item_revisions_server
+          ON tracker_item_revisions (item_id, server_revision) WHERE server_revision IS NOT NULL;
+
+        -- History is recorded only for these (knowledge) types. Everything else
+        -- gets a revision only when something cites it (pinItemRevision).
+        CREATE TABLE IF NOT EXISTS tracker_revision_types (type TEXT PRIMARY KEY);
+        INSERT INTO tracker_revision_types (type) VALUES
+          ('source'), ('capture'), ('citation'),
+          ('entity'), ('claim'), ('question'), ('finding'), ('investigation')
+        ON CONFLICT (type) DO NOTHING;
+
+        CREATE OR REPLACE FUNCTION tracker_items_record_revision() RETURNS trigger AS $fn$
+        DECLARE
+          prev_id   TEXT;
+          prev_data JSONB;
+          prev_deleted_at TIMESTAMPTZ;
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM tracker_revision_types t WHERE t.type = NEW.type) THEN
+            RETURN NULL;
+          END IF;
+          -- The tip is the revision nothing else claims as parent. Not
+          -- ORDER BY recorded_at: two writes inside one millisecond share a
+          -- timestamp and the tie-break would invert real history. Mirrors the
+          -- SQLite trigger.
+          SELECT revision_id, data, deleted_at INTO prev_id, prev_data, prev_deleted_at
+            FROM tracker_item_revisions r
+            WHERE r.item_id = NEW.id
+              AND NOT EXISTS (
+                SELECT 1 FROM tracker_item_revisions p
+                WHERE p.item_id = NEW.id AND p.parent_revision_id = r.revision_id
+              )
+            LIMIT 1;
+          -- An insert that reproduces the latest recorded revision (same data,
+          -- same deleted/live state) records nothing. Over a tombstone tip a
+          -- live insert is a resurrection and is recorded. Mirrors the WHEN
+          -- guard on the SQLite insert trigger.
+          IF TG_OP = 'INSERT'
+             AND prev_id IS NOT NULL
+             AND prev_data IS NOT DISTINCT FROM NEW.data
+             AND (prev_deleted_at IS NULL) = (NEW.deleted_at IS NULL) THEN
+            RETURN NULL;
+          END IF;
+          INSERT INTO tracker_item_revisions (
+            revision_id, item_id, parent_revision_id, workspace, data, actor, published, sync_status, sync_id, deleted_at
+          ) VALUES (
+            gen_random_uuid()::text,
+            NEW.id,
+            prev_id,
+            NEW.workspace,
+            NEW.data,
+            COALESCE(
+              NEW.data->'lastModifiedBy',
+              NEW.data->'customFields'->'lastModifiedBy',
+              NEW.data->'authorIdentity',
+              NEW.data->'customFields'->'authorIdentity'
+            ),
+            CASE
+              WHEN NEW.data->>'shared' = 'true'
+                OR NEW.data->'share'->>'status' = 'team'
+                OR NEW.data->'share'->>'body' = 'team'
+                OR NEW.data->'customFields'->'share'->>'status' = 'team'
+                OR NEW.data->'customFields'->'share'->>'body' = 'team' THEN TRUE
+              WHEN NEW.data->>'shared' = 'false'
+                OR NEW.data->'share'->>'status' = 'private'
+                OR NEW.data->'share'->>'body' = 'private'
+                OR NEW.data->'customFields'->'share'->>'status' = 'private'
+                OR NEW.data->'customFields'->'share'->>'body' = 'private' THEN FALSE
+              WHEN NEW.sync_status IN ('synced', 'pending') THEN TRUE
+              ELSE NULL
+            END,
+            NEW.sync_status,
+            NEW.sync_id,
+            NEW.deleted_at
+          );
+          RETURN NULL;
+        END;
+        $fn$ LANGUAGE plpgsql;
+
+        CREATE OR REPLACE FUNCTION tracker_items_record_delete_revision() RETURNS trigger AS $fn$
+        DECLARE
+          prev_id TEXT;
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM tracker_revision_types t WHERE t.type = OLD.type) THEN
+            RETURN NULL;
+          END IF;
+          SELECT revision_id INTO prev_id
+            FROM tracker_item_revisions r
+            WHERE r.item_id = OLD.id
+              AND NOT EXISTS (
+                SELECT 1 FROM tracker_item_revisions p
+                WHERE p.item_id = OLD.id AND p.parent_revision_id = r.revision_id
+              )
+            LIMIT 1;
+          INSERT INTO tracker_item_revisions (
+            revision_id, item_id, parent_revision_id, workspace, data, actor,
+            published, sync_status, sync_id, deleted_at
+          ) VALUES (
+            gen_random_uuid()::text,
+            OLD.id,
+            prev_id,
+            OLD.workspace,
+            OLD.data,
+            -- The row names its last editor, not whoever deleted it.
+            NULL,
+            CASE
+              WHEN OLD.data->>'shared' = 'true'
+                OR OLD.data->'share'->>'status' = 'team'
+                OR OLD.data->'share'->>'body' = 'team'
+                OR OLD.data->'customFields'->'share'->>'status' = 'team'
+                OR OLD.data->'customFields'->'share'->>'body' = 'team' THEN TRUE
+              WHEN OLD.data->>'shared' = 'false'
+                OR OLD.data->'share'->>'status' = 'private'
+                OR OLD.data->'share'->>'body' = 'private'
+                OR OLD.data->'customFields'->'share'->>'status' = 'private'
+                OR OLD.data->'customFields'->'share'->>'body' = 'private' THEN FALSE
+              WHEN OLD.sync_status IN ('synced', 'pending') THEN TRUE
+              ELSE NULL
+            END,
+            OLD.sync_status,
+            OLD.sync_id,
+            NOW()
+          );
+          RETURN NULL;
+        END;
+        $fn$ LANGUAGE plpgsql;
+
+        DROP TRIGGER IF EXISTS tracker_items_ai_revision ON tracker_items;
+        DROP TRIGGER IF EXISTS tracker_items_au_revision ON tracker_items;
+        DROP TRIGGER IF EXISTS tracker_items_ad_revision ON tracker_items;
+
+        CREATE TRIGGER tracker_items_ai_revision AFTER INSERT ON tracker_items
+          FOR EACH ROW EXECUTE FUNCTION tracker_items_record_revision();
+
+        CREATE TRIGGER tracker_items_au_revision AFTER UPDATE OF data, deleted_at ON tracker_items
+          FOR EACH ROW WHEN (
+            NEW.data IS DISTINCT FROM OLD.data OR NEW.deleted_at IS DISTINCT FROM OLD.deleted_at
+          )
+          EXECUTE FUNCTION tracker_items_record_revision();
+
+        CREATE TRIGGER tracker_items_ad_revision AFTER DELETE ON tracker_items
+          FOR EACH ROW EXECUTE FUNCTION tracker_items_record_delete_revision();
+      `);
+      console.log('[PGLite Worker] tracker_item_revisions table created successfully');
+    } catch (error) {
+      console.error('[PGLite Worker] Failed to create tracker_item_revisions table; revision history is unavailable on this install:', error);
+    }
+
     // Migration: Ensure ai_tool_call_file_edits FK points to ai_agent_messages (not ai_transcript_events).
     // A previous buggy migration may have re-pointed it to ai_transcript_events.
     //
@@ -3217,6 +3476,102 @@ class PGLiteWorker {
       console.error('[PGLite Worker] Failed to create feedback_request_index tables:', error);
       throw error;
     }
+
+    await this.db.exec(`CREATE TABLE IF NOT EXISTS document_feedback_index_cache (
+  workspace_path TEXT NOT NULL,
+  org_id TEXT NOT NULL,
+  viewer_user_id TEXT NOT NULL,
+  data JSONB NOT NULL,
+  PRIMARY KEY (workspace_path, org_id, viewer_user_id)
+);
+`);
+
+    // Migration: pure GitHub issues cache (schema version 35).
+    // Mirror of SQLite 0035_github_issues.sql, using native JSONB.
+    try {
+      await this.db.exec(`
+        CREATE TABLE IF NOT EXISTS github_issues (
+          id           TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          remote       TEXT NOT NULL,
+          number       INTEGER NOT NULL,
+          state        TEXT NOT NULL,
+          data         JSONB NOT NULL,
+          created_at   TIMESTAMPTZ NOT NULL,
+          updated_at   TIMESTAMPTZ NOT NULL,
+          fetched_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE (workspace_id, remote, number)
+        );
+        CREATE INDEX IF NOT EXISTS idx_github_issues_workspace_remote_state
+          ON github_issues (workspace_id, remote, state);
+        CREATE INDEX IF NOT EXISTS idx_github_issues_updated
+          ON github_issues (updated_at);
+
+        CREATE TABLE IF NOT EXISTS github_issue_comments (
+          issue_id   TEXT NOT NULL REFERENCES github_issues(id) ON DELETE CASCADE,
+          id         TEXT NOT NULL,
+          data       JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL,
+          fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (issue_id, id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_github_issue_comments_issue_created
+          ON github_issue_comments (issue_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS github_issue_events (
+          issue_id   TEXT NOT NULL REFERENCES github_issues(id) ON DELETE CASCADE,
+          id         TEXT NOT NULL,
+          event      TEXT NOT NULL,
+          data       JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL,
+          fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (issue_id, id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_github_issue_events_issue_created
+          ON github_issue_events (issue_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS github_issue_poll_state (
+          workspace_id           TEXT NOT NULL,
+          remote                 TEXT NOT NULL,
+          last_successful_poll_at TIMESTAMPTZ NOT NULL,
+          PRIMARY KEY (workspace_id, remote)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tracker_github_issue_overlay_url
+          ON tracker_items (workspace, LOWER(data->>'issueUrl'))
+          WHERE type = 'github-issue'
+            AND deleted_at IS NULL
+            AND data->>'issueUrl' IS NOT NULL;
+      `);
+      console.log('[PGLite Worker] github issues cache created successfully');
+    } catch (error) {
+      console.error('[PGLite Worker] Failed to create github issues cache:', error);
+      throw error;
+    }
+
+    // External session persistence migration.
+    // Keep aligned with SQLite migration 0044; cursor JSON is TEXT on both engines.
+    await this.db.exec(`
+      -- Nonunique: historical sessions may share a resume handle. Lookup rejects ambiguity.
+      CREATE INDEX IF NOT EXISTS idx_ai_sessions_provider_session
+        ON ai_sessions (provider, provider_session_id, workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_ai_agent_messages_provider_identity
+        ON ai_agent_messages (session_id, source, direction, provider_message_id)
+        WHERE provider_message_id IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS external_session_cursors (
+        provider TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        workspace_path TEXT NOT NULL,
+        session_id TEXT NOT NULL REFERENCES ai_sessions(id) ON DELETE CASCADE,
+        cursor TEXT,
+        PRIMARY KEY (provider, external_id, file_path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_external_session_cursors_session
+        ON external_session_cursors (session_id);
+    `);
   }
 
   async query(message) {
@@ -3266,12 +3621,7 @@ class PGLiteWorker {
     try {
       const execStart = performance.now();
       await this.db.transaction(async (tx) => {
-        for (const statement of statements) {
-          if (!statement || typeof statement.sql !== 'string') {
-            throw new Error('transaction statement sql must be a string');
-          }
-          await tx.query(statement.sql, statement.params);
-        }
+        await runTransactionStatements(tx, statements);
       });
       return {
         id: message.id,
@@ -3416,9 +3766,18 @@ class PGLiteWorker {
       // Execute a simple query to verify it works
       await testDb.query('SELECT 1');
 
-      // Check data counts in key tables for integrity verification
-      let sessionCount = 0;
-      let historyCount = 0;
+      // Content indicators. These are left UNDEFINED rather than zeroed when
+      // the query fails: recovery treats an absent count as "we could not
+      // look", and a store whose tables are missing is one we must not restore
+      // onto. Reporting 0 there said "this database is empty", which is a
+      // different and much more dangerous claim (#1347).
+      //
+      // `projects` is counted too. An install whose data is shared projects
+      // rather than AI sessions was being classified as an empty candidate and
+      // refused recovery.
+      let sessionCount;
+      let historyCount;
+      let projectCount;
       try {
         const countResult = await testDb.query(`
           SELECT
@@ -3433,13 +3792,24 @@ class PGLiteWorker {
         // Tables might not exist yet - that's okay for a fresh database
         console.log('[PGLite Worker] Could not count records (tables may not exist):', countError.message);
       }
+      try {
+        // Separate from the pair above so an install predating the projects
+        // table still reports its sessions and history.
+        const projectResult = await testDb.query('SELECT COUNT(*) AS projects FROM projects');
+        if (projectResult.rows && projectResult.rows[0]) {
+          projectCount = parseInt(projectResult.rows[0].projects) || 0;
+        }
+      } catch (projectError) {
+        console.log('[PGLite Worker] Could not count projects:', projectError.message);
+      }
 
       // Close cleanly
       await testDb.close();
 
       console.log('[PGLite Worker] Backup verification successful', {
         sessionCount,
-        historyCount
+        historyCount,
+        projectCount
       });
 
       return {
@@ -3449,7 +3819,8 @@ class PGLiteWorker {
           valid: true,
           sessionCount,
           historyCount,
-          hasData: sessionCount > 0 || historyCount > 0
+          projectCount,
+          hasData: sessionCount > 0 || historyCount > 0 || projectCount > 0
         }
       };
     } catch (error) {

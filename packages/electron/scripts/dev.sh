@@ -10,6 +10,14 @@ for arg in "$@"; do
   fi
 done
 
+# The renderer imports @nimbalyst/extension-sdk from its compiled dist/, which
+# no dev watcher rebuilds. An edit to extension-sdk/src therefore leaves the
+# running app on the previous bundle -- silently, until the two versions
+# disagree at runtime (a multi-root `roots` array reaching a single-root
+# `getWorkspaceRelativeFilePath` crashed the file-edits sidebar this way).
+# tsc is incremental, so this costs ~1s once dist/ is warm.
+npm --prefix ../extension-sdk run build || exit 1
+
 # When NIMBALYST_USER_DATA_DIR is set, use a separate build output directory
 # to avoid triggering the primary dev instance's file watcher. Without this,
 # both electron-vite watchers share out/main/index.js and the module-level
@@ -19,5 +27,6 @@ if [ -n "$NIMBALYST_USER_DATA_DIR" ]; then
   echo "[dev.sh] Using isolated build output: out2/"
   npm run build:worker && npx electron-vite dev --outDir=out2
 else
-  npm run build:worker && npx electron-vite dev
+  # dev-loop.sh serves the renderer itself; skip the missing-renderer warning.
+  npm run build:worker && npx electron-vite dev ${NIMBALYST_EXTERNAL_RENDERER:+--ignoreConfigWarning}
 fi

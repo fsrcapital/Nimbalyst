@@ -1,8 +1,8 @@
+import Store from '../../utils/privateSettingsStore';
+export { handleAskUserQuestion } from './askUserQuestionHandler';
 import { BrowserWindow, ipcMain } from "electron";
-import {
-  AgentMessagesRepository,
-  AISessionsRepository,
-} from "@nimbalyst/runtime";
+import { AgentMessagesRepository } from "@nimbalyst/runtime/storage/repositories/AgentMessagesRepository";
+import { AISessionsRepository } from "@nimbalyst/runtime/storage/repositories/AISessionsRepository";
 import { STRUCTURED_INPUT_FIELD_TYPES } from "@nimbalyst/collab-protocol";
 import { getSessionStateManager } from "@nimbalyst/runtime/ai/server/SessionStateManager";
 import { notificationService } from "../../services/NotificationService";
@@ -34,6 +34,7 @@ import { broadcastMessageLogged } from "../../services/ai/claudeCliUserPromptLog
 import { ClaudeSettingsManager } from "../../services/ClaudeSettingsManager";
 import { getPermissionService } from "../../services/PermissionService";
 import { SessionCommitService } from "../../services/SessionCommitService";
+import { resolveGitCommitProposalTarget } from "../../services/gitCommitProposalTarget";
 import { findFreshInteractiveResponse } from "./interactiveResponsePolling";
 import {
   clearPendingInteractiveWaiter,
@@ -56,6 +57,19 @@ import {
   type InteractivePromptSettleReason,
 } from "./interactivePromptAbandonment";
 
+/**
+ * A tool that only asks the user something and returns their answer changes no
+ * state, so it is read-only in the MCP sense. Declaring that is not cosmetic:
+ * Codex CLI gates MCP tool calls on `readOnlyHint` by default, and a tool
+ * without it is treated as a write that needs approval. Nimbalyst runs Codex
+ * with `approval_policy: 'never'` in every mode except Agent-verified bypass
+ * (see codexPermissionProfile.ts), so such a call fails outright with
+ * "MCP tool call requires approval, but approval policy is never" -- the user
+ * sees the question card render but the call never reaches this process, so
+ * nothing can answer it. See #1553.
+ */
+const ASKS_USER_ONLY = { readOnlyHint: true } as const;
+
 export function getInteractiveToolSchemas(sessionId: string | undefined) {
   if (!sessionId) return [];
 
@@ -63,6 +77,7 @@ export function getInteractiveToolSchemas(sessionId: string | undefined) {
     requestUserInputSchema(),
     {
       name: "AskUserQuestion",
+      annotations: ASKS_USER_ONLY,
       description:
         "Prompt the user with one or more multiple-choice questions and wait for their response. Use for explicit confirmation or disambiguation.",
       inputSchema: {
@@ -122,6 +137,10 @@ export function getInteractiveToolSchemas(sessionId: string | undefined) {
 
 IMPORTANT: First call get_session_edited_files, cross-reference with git status, and include ALL session-edited files that have uncommitted changes — do not cherry-pick a subset.
 
+Relative paths target the session's checkout (its worktree when linked). workingDirectory is unsupported; use a session in the intended checkout. Absolute paths may also target attached repositories. Files outside these roots are rejected.
+
+ONE REPOSITORY PER CALL. A commit cannot span repositories. If the files you are committing live in more than one repository (a workspace can have attached folders that are their own checkouts), call this tool once per repository — each call with only that repository's files and a commit message describing that repository's change. A call whose files span repositories is rejected.
+
 Commit message: type prefix (feat:/fix:/refactor:/docs:/test:/chore:), title states the user-visible outcome, focus on impact and why (not technique), lines under 72 chars, no emojis, dash bullets only for multiple distinct changes. If the commit resolves an issue or tracker item, include its canonical closing reference (e.g. Fixes #123, Closes ABC-123), or a neutral reference line if the closing syntax is unclear.`,
       inputSchema: {
         type: "object",
@@ -136,7 +155,8 @@ Commit message: type prefix (feat:/fix:/refactor:/docs:/test:/chore:), title sta
                   properties: {
                     path: {
                       type: "string",
-                      description: "File path relative to workspace root",
+                      description:
+                        "File path, either relative to the session checkout (its worktree when linked) or absolute. Files in an attached folder are supplied to you as absolute paths; pass them back unchanged.",
                     },
                     status: {
                       type: "string",
@@ -172,385 +192,6 @@ type McpToolResult = {
   content: Array<{ type: string; text: string }>;
   isError: boolean;
 };
-
-export async function handleAskUserQuestion(
-  args: any,
-  sessionId: string | undefined,
-  request: any,
-  extra?: InteractivePromptCallExtra,
-): Promise<McpToolResult> {
-  const typedArgs = args as
-    | {
-        questions?: Array<{
-          header?: string;
-          question?: string;
-          options?: Array<{ label?: string; description?: string }>;
-          multiSelect?: boolean;
-        }>;
-      }
-    | undefined;
-
-  const rawQuestions = Array.isArray(typedArgs?.questions)
-    ? typedArgs.questions
-    : [];
-
-  if (rawQuestions.length === 0) {
-    return {
-      content: [
-        { type: "text", text: "Error: questions is required and must be a non-empty array" },
-      ],
-      isError: true,
-    };
-  }
-
-  const normalizedQuestions = rawQuestions
-    .map((question) => {
-      if (!question || typeof question !== "object") {
-        return null;
-      }
-
-      const header = typeof question.header === "string" ? question.header : "";
-      const prompt = typeof question.question === "string" ? question.question : "";
-      const rawOptions = Array.isArray(question.options) ? question.options : [];
-      if (!header || !prompt || rawOptions.length === 0) {
-        return null;
-      }
-
-      const options = rawOptions
-        .map((option) => {
-          const label =
-            option && typeof option.label === "string" ? option.label : "";
-          const description =
-            option && typeof option.description === "string"
-              ? option.description
-              : "";
-          if (!label || !description) {
-            return null;
-          }
-          return { label, description };
-        })
-        .filter(
-          (option): option is { label: string; description: string } =>
-            option !== null
-        );
-
-      if (options.length === 0) {
-        return null;
-      }
-
-      return {
-        header,
-        question: prompt,
-        options,
-        multiSelect: question.multiSelect === true,
-      };
-    })
-    .filter(
-      (
-        question
-      ): question is {
-        header: string;
-        question: string;
-        options: Array<{ label: string; description: string }>;
-        multiSelect: boolean;
-      } => question !== null
-    );
-
-  if (normalizedQuestions.length === 0) {
-    return {
-      content: [
-        { type: "text", text: "Error: No valid questions found in request" },
-      ],
-      isError: true,
-    };
-  }
-
-  const questionId =
-    await resolveToolUseIdFromMcpRequest(request, sessionId, "AskUserQuestion") ||
-    `ask-${sessionId || "unknown"}-${Date.now()}`;
-  const questionIdAliasSet = new Set([questionId]);
-  const responseNotBefore = Date.now();
-  const questionResponseChannel = `ask-user-question-response:${sessionId || "unknown"}:${questionId}`;
-  const fallbackSessionChannel = `ask-user-question:${sessionId || "unknown"}`;
-
-  console.log(`[MCP Server] AskUserQuestion waiting for response: questionId=${questionId}, sessionId=${sessionId}`);
-
-  // Update session status so all windows show the pending indicator
-  if (sessionId) {
-    getSessionStateManager().updateActivity({
-      sessionId,
-      status: 'waiting_for_input',
-    }).catch((err) => {
-      console.error('[MCP Server] Failed to update session status to waiting_for_input:', err);
-    });
-  }
-
-  // The external CLI can block before proxy observation writes its assembled
-  // assistant turn. Persist the prompt immediately so the durable transcript
-  // always has an answerable widget, including after a renderer remount or a
-  // missed proxy observation. A later proxy turn reuses the same tool-use id and
-  // is deduplicated by ClaudeCodeRawParser.
-  const isCliSession = await isClaudeCliSession(sessionId);
-  if (isCliSession && sessionId) {
-    await persistInteractivePromptToolUse({
-      sessionId,
-      toolUseId: questionId,
-      toolName: 'AskUserQuestion',
-      input: { questions: normalizedQuestions },
-    });
-    broadcastMessageLogged(sessionId, '');
-  }
-
-  // NIM-850: drive the pending-interactive-prompt flag from the explicit prompt
-  // lifecycle (mirrors PromptForUserInput's ai:requestUserInput and the SDK path),
-  // NOT from the coarse pid-`waiting` status. The renderer's session:waiting
-  // handler no longer sets the flag for claude-code-cli, because that pid signal
-  // also fires for routine tool/MCP waits and — with no symmetric clear — left
-  // "Thinking…" suppressed for the rest of the turn. Broadcasting ai:askUserQuestion
-  // here sets the flag (and feeds voice mode) exactly while the question is pending;
-  // the settle below broadcasts ai:askUserQuestionAnswered to clear it. Sent to all
-  // windows (the renderer handler keys by sessionId).
-  //
-  // The broadcast stays CLI-only for the reason above. The pending bit does NOT:
-  // this handler serves the MCP AskUserQuestion tool for every provider, and an
-  // SDK session waiting on this question is exactly as blocked as a CLI one.
-  // Guarding it meant neither the sidebar nor the menu bar knew, and the tray
-  // panel filed those sessions under "Running".
-  if (sessionId) {
-    void setSessionPendingPrompt(sessionId, true);
-  }
-  if (isCliSession && sessionId) {
-    for (const w of BrowserWindow.getAllWindows()) {
-      if (!w.isDestroyed()) {
-        w.webContents.send("ai:askUserQuestion", {
-          sessionId,
-          questionId,
-          questions: normalizedQuestions,
-        });
-      }
-    }
-  }
-
-  // NIM-2208: registered immediately before the wait and cleared in settle, so
-  // the stale-prompt reconcile can never clear the "awaiting input" bit while
-  // this handler is genuinely blocked.
-  if (sessionId) {
-    noteLiveInteractivePrompt(sessionId);
-    noteLiveRemoteInteractivePrompt(sessionId, {
-      id: questionId,
-      promptId: questionId,
-      promptType: 'ask_user_question_request',
-      createdAt: responseNotBefore,
-      content: {
-        questions: normalizedQuestions,
-        questionId,
-      },
-    });
-  }
-
-  return new Promise((resolve) => {
-    let settled = false;
-    let pollTimer: ReturnType<typeof setInterval> | null = null;
-    let detachCall: (() => void) | null = null;
-
-    const settle = (result: {
-      answers?: Record<string, string>;
-      cancelled?: boolean;
-      respondedBy?: "desktop" | "mobile";
-    }, source: string = 'unknown', reason: InteractivePromptSettleReason = 'user-responded') => {
-      if (settled) return;
-      settled = true;
-      detachCall?.();
-      if (sessionId) {
-        clearLiveInteractivePrompt(sessionId);
-        clearLiveRemoteInteractivePrompt(sessionId, questionId);
-      }
-
-      // The client walking away does not answer the question. Tear the waiter
-      // down (below) but leave the widget answerable -- a later answer finds no
-      // live waiter and resumes the session with it as a new turn (#1116).
-      const terminalize = shouldTerminalizePrompt({
-        kind: 'ask_user_question',
-        reason,
-      });
-
-      console.log(`[MCP Server] AskUserQuestion settled via ${source}: questionId=${questionId}, cancelled=${result?.cancelled}`);
-
-      // Restore the running indicator as the turn resumes. CLI sessions defer to
-      // the PID-state watcher (NIM-806 Defect A — forcing 'running' here would
-      // race the watcher's turn-ending 'idle' and stick the indicator on).
-      if (sessionId) {
-        void applyInteractivePromptSettleTurnState({
-          sessionId,
-          isCliSession,
-          stateManager: getSessionStateManager(),
-        }).catch(() => {});
-      }
-
-      if (pollTimer) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-      }
-      ipcMain.removeListener(questionResponseChannel, onQuestionIdResponse);
-      ipcMain.removeListener(fallbackSessionChannel, onSessionFallbackResponse);
-
-      const cancelled = result?.cancelled === true;
-      const answers =
-        result?.answers && typeof result.answers === "object"
-          ? result.answers
-          : {};
-      const respondedBy = result?.respondedBy || "desktop";
-
-      // NIM-806: mirror the start write — the external CLI never emits a
-      // tool_result block, so persist a synthetic one to flip the widget out of
-      // its pending state (ClaudeCliPromptSurface drops answered prompts).
-      // Symmetric with the set above: clear for every provider, so an answered
-      // question cannot leave a session stuck showing "awaiting input".
-      if (sessionId) {
-        void setSessionPendingPrompt(sessionId, false);
-      }
-      if (isCliSession && sessionId) {
-        // Only a real response closes the widget out. An abandoned call leaves
-        // the tool call pending on purpose, so the question can still be
-        // answered (and resume the session) later.
-        if (terminalize) {
-          void persistInteractivePromptToolResult({
-            sessionId,
-            toolUseId: questionId,
-            result: {
-              answers: cancelled ? {} : answers,
-              cancelled,
-              respondedBy,
-              respondedAt: Date.now(),
-            },
-            isError: cancelled,
-          });
-        }
-
-        // NIM-850: the resolved broadcast. For claude-code-cli the renderer
-        // otherwise never clears the flag mid-turn — session:streaming
-        // intentionally doesn't, and there was no resolved broadcast — so
-        // "Thinking…" stayed suppressed until the turn ended. Mirrors
-        // PromptForUserInput's ai:requestUserInputResolved. Sent on abandonment
-        // too: nothing is blocked on this session any more, whether or not the
-        // question still stands.
-        for (const w of BrowserWindow.getAllWindows()) {
-          if (!w.isDestroyed()) {
-            w.webContents.send("ai:askUserQuestionAnswered", {
-              sessionId,
-              questionId,
-            });
-          }
-        }
-      }
-
-      if (cancelled) {
-        resolve({
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                cancelled: true,
-                respondedBy,
-                respondedAt: Date.now(),
-              }),
-            },
-          ],
-          isError: true,
-        });
-        return;
-      }
-
-      resolve({
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              answers,
-              respondedBy,
-              respondedAt: Date.now(),
-            }),
-          },
-        ],
-        isError: false,
-      });
-    };
-
-    const onQuestionIdResponse = (
-      _event: unknown,
-      result: {
-        answers?: Record<string, string>;
-        cancelled?: boolean;
-        respondedBy?: "desktop" | "mobile";
-      }
-    ) => settle(result, 'ipc-specific');
-
-    const onSessionFallbackResponse = (
-      _event: unknown,
-      result: {
-        questionId?: string;
-        answers?: Record<string, string>;
-        cancelled?: boolean;
-        respondedBy?: "desktop" | "mobile";
-      }
-    ) => {
-      settle(result, 'ipc-fallback');
-    };
-
-    ipcMain.once(questionResponseChannel, onQuestionIdResponse);
-    ipcMain.once(fallbackSessionChannel, onSessionFallbackResponse);
-
-    // #1341: keep the call off the client's idle watchdog while the question is
-    // on screen, and settle as cancelled if the client gives up on it anyway --
-    // an abandoned question must not keep offering buttons whose answer has
-    // nowhere to go (NIM-2607).
-    detachCall = attachInteractivePromptCall({
-      request,
-      extra,
-      toolName: 'AskUserQuestion',
-      onAbort: () => settle({ cancelled: true }, 'client-abort', 'client-abandoned'),
-    });
-
-    // Database polling fallback: if the IPC path fails (e.g., transport issues),
-    // poll for a response message written by the AIService answer handler.
-    if (sessionId) {
-      const POLL_INTERVAL = 1000;
-      const MAX_POLL_TIME = 10 * 60 * 1000;
-      const pollStart = Date.now();
-
-      pollTimer = setInterval(async () => {
-        if (settled || Date.now() - pollStart > MAX_POLL_TIME) {
-          if (pollTimer) {
-            clearInterval(pollTimer);
-            pollTimer = null;
-          }
-          return;
-        }
-
-        try {
-          const messages = await AgentMessagesRepository.listTail(sessionId, 50);
-          const content = findFreshInteractiveResponse(messages, {
-            expectedType: "ask_user_question_response",
-            idFields: ["questionId", "rawQuestionId"],
-            acceptedIds: questionIdAliasSet,
-            notBefore: responseNotBefore,
-          });
-          if (!content) return;
-          if (content.cancelled) {
-            settle({ cancelled: true, respondedBy: content.respondedBy as "desktop" | "mobile" | undefined }, 'db-poll');
-          } else {
-            settle({
-              answers: content.answers as Record<string, string> | undefined,
-              respondedBy: content.respondedBy as "desktop" | "mobile" | undefined,
-            }, 'db-poll');
-          }
-        } catch {
-          // Database error, continue polling
-        }
-      }, POLL_INTERVAL);
-    }
-  });
-}
 
 /** IPC channel the renderer's ToolPermission answer is routed onto (per request). */
 export function getToolPermissionResponseChannel(
@@ -607,7 +248,11 @@ function waitForToolPermissionAnswer(
       request: undefined,
       extra: { signal },
       toolName: 'ToolPermission',
-      onAbort: () => settle({ decision: 'deny', scope: 'once', cancelled: true }, 'client-abort'),
+      onAbort: () =>
+        settle(
+          { decision: 'deny', scope: 'once', cancelled: true, unansweredReason: 'client-abort' },
+          'client-abort',
+        ),
     });
 
     const POLL_INTERVAL = 1000;
@@ -632,7 +277,10 @@ function waitForToolPermissionAnswer(
       console.warn(
         `[MCP Server] ToolPermission timed out (deny): requestId=${requestId}`,
       );
-      settle({ decision: "deny", scope: "once", cancelled: true }, "timeout");
+      settle(
+        { decision: "deny", scope: "once", cancelled: true, unansweredReason: "timeout" },
+        "timeout",
+      );
     }, MAX_WAIT);
   });
 }
@@ -811,6 +459,7 @@ export async function handleGitCommitProposal(
         filesToStage?: FileToStage[] | string;
         commitMessage?: string;
         reasoning?: string;
+        workingDirectory?: unknown;
       }
     | undefined;
 
@@ -860,6 +509,27 @@ export async function handleGitCommitProposal(
     };
   }
 
+  let target: Awaited<ReturnType<typeof resolveGitCommitProposalTarget>>;
+  try {
+    target = await resolveGitCommitProposalTarget(
+      sessionId,
+      workspacePath,
+      proposalArgs.filesToStage.map(file => typeof file === "string" ? file : file.path),
+      proposalArgs.workingDirectory,
+    );
+    // Persist absolute paths so consumers of the durable proposal do not
+    // reinterpret relative files against the parent MCP configuration root.
+    proposalArgs.filesToStage = proposalArgs.filesToStage.map((file, index) =>
+      typeof file === "string" ? target.files[index] : { ...file, path: target.files[index] }
+    );
+  } catch (error) {
+    return {
+      content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+      isError: true,
+    };
+  }
+  const proposalRepoPath = target.repoPath;
+
   // Find the target window (resolves worktree paths to parent project)
   const commitWindowId = await findWindowIdForWorkspacePath(workspacePath);
   if (!commitWindowId) {
@@ -891,6 +561,15 @@ export async function handleGitCommitProposal(
 
   const targetSessionId = sessionId || "unknown";
 
+  // Decide before publishing: voice must never request approval for an automatic commit.
+  let isAutoCommit = false;
+  try {
+    const aiSettingsStore = new Store({ name: "ai-settings" });
+    isAutoCommit = aiSettingsStore.get("autoCommitEnabled", false) as boolean;
+  } catch {
+    // If we can't read settings, fall through to manual mode
+  }
+
   // Persist the proposal to database for durability
   try {
     const now = new Date();
@@ -921,6 +600,9 @@ export async function handleGitCommitProposal(
               filesToStage: proposalArgs.filesToStage,
               commitMessage: proposalArgs.commitMessage,
               reasoning: proposalArgs.reasoning,
+              // Resolved here, not sent by the model. The widget reads the tool
+              // input, so this is the only place it can reach it.
+              repoPath: proposalRepoPath,
             },
           }),
           hidden: false,
@@ -940,52 +622,42 @@ export async function handleGitCommitProposal(
       direction: "output",
       content: JSON.stringify({
         type: "git_commit_proposal",
+        autoApproved: isAutoCommit,
         proposalId,
         toolUseId,
         filesToStage: proposalArgs.filesToStage,
         commitMessage: proposalArgs.commitMessage,
         reasoning: proposalArgs.reasoning,
-        workspacePath,
+        workspacePath: target.workspacePath,
+        // The repo this proposal commits into, resolved from the files. The
+        // widget names it and renders paths relative to it -- an attached
+        // folder's absolute path would otherwise render as a tree from `/`.
+        repoPath: proposalRepoPath,
         timestamp: now.getTime(),
         status: "pending",
       }),
       hidden: false,
       createdAt: now,
     });
-    // console.log(
-    //   `[MCP Server] Persisted git commit proposal: ${proposalId}, notifying renderer for session: ${targetSessionId}`
-    // );
     if (commitWindow) {
-      // Include proposal data in the IPC so renderer-side consumers (the
-      // GitCommit widget AND the voice forwarding path) can display the
-      // commit message and act on the file list without needing a separate
-      // round-trip to load the persisted proposal from the database.
+      // Include the approval decision and proposal data so voice needs no settings/DB round-trip.
       commitWindow.webContents.send("ai:gitCommitProposal", {
+        autoApproved: isAutoCommit,
         sessionId: targetSessionId,
         proposalId,
         commitMessage: proposalArgs.commitMessage,
         filesToStage: proposalArgs.filesToStage,
-        workspacePath,
+        workspacePath: target.workspacePath,
       });
     } else {
       console.warn("[MCP Server] No commitWindow found to send IPC event");
     }
 
-    // Persist pending-prompt bit + push to mobile (this also notifies the tray)
-    void setSessionPendingPrompt(targetSessionId, true);
+    // An automatic commit is running work, not a request for user input.
+    if (!isAutoCommit) void setSessionPendingPrompt(targetSessionId, true);
   } catch (error) {
     console.error("[MCP Server] Failed to persist git commit proposal:", error);
     // Continue anyway - worst case is no durability
-  }
-
-  // Check if auto-commit is enabled
-  let isAutoCommit = false;
-  try {
-    const Store = (await import("electron-store")).default;
-    const aiSettingsStore = new Store({ name: "ai-settings" });
-    isAutoCommit = aiSettingsStore.get("autoCommitEnabled", false) as boolean;
-  } catch {
-    // If we can't read settings, fall through to manual mode
   }
 
   if (isAutoCommit) {
@@ -1000,7 +672,7 @@ export async function handleGitCommitProposal(
 
     const {
       createGitCommitProposalResponse,
-      executeGitCommit,
+      executeGitCommitAcrossRepos,
     } = await import("../../services/GitCommitService");
 
     let commitResult: {
@@ -1010,11 +682,11 @@ export async function handleGitCommitProposal(
       error?: string;
     };
     try {
-      commitResult = await executeGitCommit(
-        workspacePath,
+      commitResult = await executeGitCommitAcrossRepos(
+        target.workspacePath,
         commitMessage,
         filePaths,
-        { logContext: "[git:auto-commit]", env: getGitSubprocessEnv() }
+        { logContext: "[git:auto-commit]", env: getGitSubprocessEnv(), repoPath: target.repoPath }
       );
     } catch (error) {
       console.error("[MCP Server] Auto-commit failed:", error);
@@ -1064,7 +736,7 @@ export async function handleGitCommitProposal(
       });
       commitWindow.webContents.send("mcp:gitCommitProposal", {
         proposalId,
-        workspacePath,
+        workspacePath: target.workspacePath,
         sessionId: targetSessionId,
         filesToStage: proposalArgs.filesToStage,
         commitMessage: proposalArgs.commitMessage,
@@ -1322,7 +994,7 @@ export async function handleGitCommitProposal(
     // Send the proposal to the renderer
     commitWindow.webContents.send("mcp:gitCommitProposal", {
       proposalId,
-      workspacePath,
+      workspacePath: target.workspacePath,
       sessionId: sessionId || "unknown",
       filesToStage: proposalArgs.filesToStage,
       commitMessage: proposalArgs.commitMessage,
@@ -1444,6 +1116,7 @@ function requestUserInputSchema() {
     // that collides with a Codex CLI built-in tool gated to Plan mode and the
     // agent gets refused with "request_user_input is unavailable in Default mode".
     name: "PromptForUserInput",
+    annotations: ASKS_USER_ONLY,
     description: `Ask the user for structured input via a composable widget with typed fields; the answer payload is keyed by field id. The "fields" argument is an ARRAY OF OBJECTS ({ type, id, label, ... }), never an array of strings — per-type required properties are documented on the field schema.
 
 Field types: multiSelect (pick a subset), singleSelect (branching choice), reorder (drag-to-reorder with optional delete), editText (edit a seeded draft), confirm (yes/no).
@@ -1589,7 +1262,7 @@ export async function handleRequestUserInput(
     });
     // Persist pending-prompt bit + push to mobile so the sidebar indicator
     // survives renderer reloads and reaches other devices.
-    void setSessionPendingPrompt(sessionId, true);
+    void setSessionPendingPrompt(sessionId, true, "decision");
   }
 
   // The external CLI can block before proxy observation writes its assembled

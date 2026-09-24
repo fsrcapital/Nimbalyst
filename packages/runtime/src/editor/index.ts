@@ -34,6 +34,19 @@ export type {
   CommentMentionPayload,
   CommentReplyPayload,
 } from './commenting/types';
+
+// In-document decisions
+export type { DecisionsConfig, DecisionMember } from './decisions/types';
+export {
+  DecisionsProvider,
+  useDecisionVotes,
+  YDocDecisionRepository,
+  DECISION_VOTES_KEY,
+  DECISION_RECOMMENDATIONS_KEY,
+  type DecisionVotingState,
+  type DecisionRepositorySnapshot,
+} from './decisions';
+
 export type {
   AgentCommentActor,
   Comment,
@@ -49,12 +62,15 @@ export {
 } from './commenting';
 export { CommentCollabProvider } from './commenting/CommentCollabProvider';
 export {
+  classifyCommentAnchorInput,
+  collabCommentAnchorAdapterRegistry,
   collabCommentControllerRegistry,
   CollabCommentControllerError,
   createCollabCommentController,
 } from './commenting/CollabCommentControllerRegistry';
 export type {
   CollabCommentController,
+  CommentAnchorInput,
   CommentAnchorSelector,
   CommentControllerErrorCode,
   CommentControllerListResult,
@@ -247,6 +263,7 @@ export { useDiffCommands, APPLY_MARKDOWN_REPLACE_COMMAND, LiveNodeKeyState } fro
 // Diff utilities (now from local plugin)
 export {
   applyMarkdownReplace,
+  applyTextReplacementsToString,
   $approveDiffs,
   $rejectDiffs,
   $hasDiffNodes,

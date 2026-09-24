@@ -6,6 +6,8 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ### Keep Commit Messages and CHANGELOG Entries Short
 
+**Write the CHANGELOG entry only when a commit is requested — never while implementing.** `CHANGELOG.md` is touched by nearly every task, so an entry written early both describes code that is not in the tree yet and collides with every other session running against this checkout. See [parallel-sessions.md](./.claude/rules/parallel-sessions.md).
+
 **One-sentence commit subject. One-sentence CHANGELOG bullet.** Commit bodies may include short bullets for distinct key changes — one line each, no prose paragraphs, no root-cause explanations unless the diff truly can't explain itself. Match the existing voice in `[Unreleased]` and recent `git log --oneline`. If your draft is longer than the surrounding entries, cut it before submitting.
 
 **One feature = one CHANGELOG bullet, no matter how many commits built it.** A multi-commit feature (e.g. a whole panel landed over a dozen PRs) gets a single user-facing line, not one bullet per commit. Do NOT append a new bullet for every follow-up commit to the same feature — edit the existing bullet instead. The `[Unreleased]` section must read like a short release summary, not a commit log.
@@ -14,11 +16,25 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 **At release time, condense — don't ship the dev-time bullets verbatim.** `[Unreleased]` accumulates verbose per-commit bullets during development. Before tagging, collapse them: merge a feature's scattered bullets into one line, drop scaffolding, squash near-duplicates. If the release notes are longer than the equivalent section in a recent shipped version, cut harder.
 
+### Keep the Feature Inventory Current
+
+**When adding, significantly expanding, or removing a notable product capability, update [FEATURE_INVENTORY.md](./docs/FEATURE_INVENTORY.md) during implementation.** Examples include a new editor, provider integration, collaboration workflow, automation, or CLI capability. It applies to every agent provider and to ordinary prompts as well as skills. The CHANGELOG's commit-time rule does not defer inventory maintenance.
+
+**Inclusion test: would someone exploring what Nimbalyst can do look for this capability by itself?** Remote agent execution and structured teammate feedback qualify. Elapsed-time counters, status badges, button placement, resizing, and automatic scrolling do not. User-visible does not automatically mean inventory-worthy. The inventory is a curated capability reference, not an exhaustive UI checklist or a second changelog.
+
+Read the relevant section first; group related functionality under an existing capability. Keep only details needed to understand its scope, platform, opt-in requirements, or material limitations. Correct obsolete claims even when the correction is small. Routine fixes, performance improvements, refactors, tests, dependency/model-version bumps, and interaction polish need no entry. Do not record plans or internal scaffolding as working features.
+
+In a parallel batch, the integrating session owns the inventory; slices report the capability change and evidence instead of editing this shared file. Before the final handoff or commit proposal, report **"Feature inventory updated"** with the section, or **"No inventory impact"** with a short reason. A slice handing the update to its integrator must say it is pending; the integrator must apply it before the batch is handed off. At release preparation, reconcile the release's Added/Changed/Removed capabilities against the inventory, checking current code when scope is unclear.
+
+### Parallel Sessions Must Not Share Files
+
+Before launching parallel work, list the files each slice will touch and confirm the sets are disjoint — including shared files like `CHANGELOG.md`, `package.json`, barrels, and central registries, which a source-only check misses. If two slices need the same file, they are one slice. Slices never run the full gate; the orchestrator runs it once. See [parallel-sessions.md](./.claude/rules/parallel-sessions.md).
+
 ### Write and Run Tests for Behavioral Changes
 
 **Any change to runtime behavior ships with a unit test** — a new test, or an extension of an existing one. Pure refactors already covered by tests, formatting, docs, and config-only changes are exempt. Before pushing, run the gate locally: `npm run typecheck && npm run test:prepush`.
 
-**Never run the suite twice to find out what failed.** It takes minutes. Every run records its failures — names, files, messages, diffs, and a command to rerun only those files — to `.vitest/last-run.log`; read it with `npm run test:last`. Never pipe a test run through `tail -n`: it truncates exactly the failure block you need and costs another full run. Capture to a file, then read the file. The repo's pre-push hook runs this automatically; it installs on `npm install` (or `npm run hooks:install`). Never push to `main` with a red suite — CI on `main` is a backstop, not the gate. For high-risk areas (sync/collab, main-process init, IPC, restart-to-verify bugs) the test comes **first** and must fail before the fix — see [end-to-end-verification.md](./.claude/rules/end-to-end-verification.md).
+**Never run the suite twice to find out what failed.** It takes minutes. Every run records its failures — names, files, messages, diffs, and a command to rerun only those files — to `.vitest/last-run.log`. Read it with `npm run test:last`, which states up front whether the tree has changed since; on `CURRENT`, re-running cannot tell you anything you do not already have. Never pipe a test run through `tail -n`: it truncates exactly the failure block you need and costs another full run. Capture to a file, then read the file. When handing failures to another session, paste the failure list into its prompt. The repo's pre-push hook runs this automatically; it installs on `npm install` (or `npm run hooks:install`). Never push to `main` with a red suite — CI on `main` is a backstop, not the gate. For high-risk areas (sync/collab, main-process init, IPC, restart-to-verify bugs) the test comes **first** and must fail before the fix — see [end-to-end-verification.md](./.claude/rules/end-to-end-verification.md).
 
 **A test's job is to catch a regression a reader cannot see.** The test corpus is ~2M tokens, and every future session pays to read the tests next to the code it touches. A test that only re-states what is obvious on screen is pure cost. Write fewer, denser tests:
 
@@ -213,6 +229,7 @@ Two-tier architecture — `ai_agent_messages` (raw append-only log, sole source 
 | [TRACKER_WORKFLOWS.md](./docs/TRACKER_WORKFLOWS.md) | Creating decision or bug tracker items as part of a fix or design decision. |
 | [ARCHITECTURE_DIAGRAMS.md](./docs/ARCHITECTURE_DIAGRAMS.md) | Considering whether a change is complex enough to warrant an Excalidraw diagram. |
 | [DEBUGGING_LOGS.md](./docs/DEBUGGING_LOGS.md) | Investigating bugs — use the log access tools, don't ask the user to paste logs. |
+| [IDENTITY_AUTH_AND_ROOMS.md](./docs/IDENTITY_AUTH_AND_ROOMS.md) | Anything touching encryption, key custody, room taxonomy, or the two JWTs. The `Encrypted*` names in the team lanes are vestigial — check the lane table before concluding anything from a name. |
 | [RENDER_PERFORMANCE.md](./docs/RENDER_PERFORMANCE.md) | Chasing excessive React re-renders, or adding a render-budget test to a hot surface. |
 | [MAIN_PROCESS_INIT.md](./packages/electron/MAIN_PROCESS_INIT.md) | Working on Electron main-process bootstrap, singleton init, or IPC handler registration. |
 | [DATABASE.md](./packages/electron/DATABASE.md) | Working with PGLite tables, shutdown, or timestamp handling. |

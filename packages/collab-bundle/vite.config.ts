@@ -114,6 +114,10 @@ function isHostSingleton(id: string): boolean {
     || id === 'lexical'
     || id.startsWith('lexical/')
     || id.startsWith('@lexical/')
+    || id === '@revolist/react-datagrid'
+    || id.startsWith('@revolist/react-datagrid/')
+    || id === '@revolist/revogrid'
+    || id.startsWith('@revolist/revogrid/')
     || id === 'yjs'
     || id.startsWith('yjs/');
 }
@@ -146,11 +150,25 @@ export default defineConfig({
       'react-dom',
       'lexical',
       '@lexical/yjs',
+      '@revolist/react-datagrid',
+      '@revolist/revogrid',
       'yjs',
       'jotai',
       'jotai-family',
     ],
     alias: [
+      {
+        find: '@nimbalyst/tracker-core',
+        replacement: fileURLToPath(new URL('../tracker-core/src', import.meta.url)),
+      },
+      {
+        find: '@nimbalyst/tracker-engine',
+        replacement: fileURLToPath(new URL('../tracker-engine/src', import.meta.url)),
+      },
+      {
+        find: '@nimbalyst/tracker-schema',
+        replacement: fileURLToPath(new URL('../tracker-schema/src', import.meta.url)),
+      },
       {
         find: /^@nimbalyst\/runtime\/(.+)$/,
         replacement: `${runtimeSource}/$1`,
@@ -175,6 +193,8 @@ export default defineConfig({
       'react-dom',
       'lexical',
       '@lexical/yjs',
+      '@revolist/react-datagrid',
+      '@revolist/revogrid',
       'yjs',
       'jotai',
       'jotai-family',
@@ -188,9 +208,18 @@ export default defineConfig({
     minify: 'esbuild',
     lib: {
       entry: {
+        // Not consumed by this package's own entries. It exists so a browser
+        // host can resolve an extension's externalized comment-UI import to the
+        // one instance this build already owns. See src/commenting-ui.ts.
+        'commenting-ui': resolve(import.meta.dirname, 'src/commenting-ui.ts'),
+        // Its own entry so a host that never opens a board never fetches
+        // `@xyflow/react`. See src/canvas.ts.
+        canvas: resolve(import.meta.dirname, 'src/canvas.ts'),
         editor: resolve(import.meta.dirname, 'src/editor/index.ts'),
         'docs-ui': resolve(import.meta.dirname, 'src/docs-ui.ts'),
         'feedback-ui': resolve(import.meta.dirname, 'src/feedback-ui.ts'),
+        'trackers-ui': resolve(import.meta.dirname, 'src/trackers-ui.ts'),
+        'quick-open': resolve(import.meta.dirname, 'src/quick-open.ts'),
         inbox: resolve(import.meta.dirname, 'src/inbox.ts'),
       },
       formats: ['es'],

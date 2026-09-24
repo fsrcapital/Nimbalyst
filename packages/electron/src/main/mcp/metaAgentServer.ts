@@ -1,3 +1,4 @@
+import type { OrchestrationMessageKind } from '@nimbalyst/runtime/ai/server/types';
 /**
  * Meta-agent (child-session orchestration) tool surface — `create_session`,
  * `spawn_session`, `send_prompt`, `list_queued_prompts`, `respond_to_prompt`,
@@ -12,7 +13,7 @@
  * `setMetaAgentToolFns`.
  */
 
-import { resolveProjectPath } from "../utils/workspaceDetection";
+import { resolveCallerWorkspaceId } from "../utils/workspaceIdentity";
 
 type CreateSessionArgs = {
   title?: string;
@@ -22,6 +23,7 @@ type CreateSessionArgs = {
   useWorktree?: boolean;
   worktreeId?: string;
   toolScope?: string;
+  effortLevel?: string;
 };
 
 type SpawnSessionArgs = {
@@ -38,6 +40,7 @@ type SpawnSessionArgs = {
    * spawned as a sibling under the caller's workstream.
    */
   isolated?: boolean;
+  effortLevel?: string;
 };
 
 type RespondToPromptArgs = {
@@ -122,7 +125,9 @@ interface MetaAgentToolFns {
     metaSessionId: string,
     workspaceId: string,
     targetSessionId: string,
-    prompt: string
+    prompt: string,
+    interrupt?: boolean,
+    messageKind?: OrchestrationMessageKind
   ) => Promise<string>;
   notifyUser: (
     metaSessionId: string,
@@ -148,7 +153,7 @@ export function setMetaAgentToolFns(fns: MetaAgentToolFns): void {
 
 /**
  * OpenAI-shaped tool definition. Mirrors the chat-completions function-calling
- * format that extension-agent tool loops (e.g. the gemini-antigravity
+ * format that host-supplied tool loops (e.g. the Gemini provider's
  * ToolLoopProtocol) consume. Built-in providers ignore this — they discover the
  * same tools over the SSE MCP server instead.
  */
@@ -221,6 +226,12 @@ export const META_AGENT_TOOL_DEFS: Array<{
           description:
             "Capability scope for the child. \"read\" = read_file/list_files/search_files only (pure investigation). \"write\" = those plus write_file but NO run_command, so the child can save a file deliverable (e.g. a report) yet cannot build/test/run anything. \"full\" (default) = all tools including run_command. Use read or write for analyze/research tasks so the child physically cannot run a build, and reserve full for tasks that must build/test.",
         },
+        effortLevel: {
+          type: "string",
+          enum: ["low", "medium", "high", "xhigh", "max", "ultra"],
+          description:
+            "Optional reasoning effort for the child. Omit to leave it on the app-wide default — an omitted value is NOT inherited from the caller. Levels above the model's ceiling are clamped down (Claude models stop at max; only some Codex models reach ultra). Use a lower level for mechanical work and a higher one for hard reasoning.",
+        },
       },
     },
   },
@@ -265,6 +276,12 @@ export const META_AGENT_TOOL_DEFS: Array<{
           description:
             "Default false. When false (the default), the calling session receives no follow-up prompt when the spawned session completes/errors/waits — fire and forget. Set true only when the caller specifically wants to be told the result and continue working with it.",
         },
+        effortLevel: {
+          type: "string",
+          enum: ["low", "medium", "high", "xhigh", "max", "ultra"],
+          description:
+            "Optional reasoning effort for the new session (e.g. model 'openai-codex:gpt-6-astra' with effortLevel 'medium'). Omit to leave it on the app-wide default — unlike `model` there is no inherit-from-caller mode. Levels above the model's ceiling are clamped down (Claude models stop at max; only some Codex models reach ultra). Use a lower level for mechanical work and a higher one for hard reasoning.",
+        },
       },
       required: ["prompt"],
     },
@@ -305,6 +322,11 @@ export const META_AGENT_TOOL_DEFS: Array<{
     },
   },
   {
+    name: "consume_session_inbox",
+    description: "Receive a bounded batch of reports for your CURRENT active turn and record receipt so they do not replay as another turn. Takes no session ID. When coordinating children, call before delegation/integration decisions, after long validation, and before final synthesis. Read the whole batch before acting. A boundary means yield at a safe point for normal queue delivery. Do not poll an empty inbox; end the turn when no independent work remains. Supports Claude Code and Codex MCP turns with verifiable tool-call identity.",
+    inputSchema: { type: "object", properties: { checkpointId: { type: "string", description: "Unique name for this checkpoint (letters, digits, underscores or hyphens; max 100). Reuse only when retrying this same read; use a new name for a later checkpoint." } }, required: ["checkpointId"] },
+  },
+  {
     name: "list_queued_prompts",
     description:
       "Inspect queued prompts for a session. By default returns only pending/executing rows with bounded prompt previews; set includeCompleted to audit recently consumed rows.",
@@ -332,7 +354,7 @@ export const META_AGENT_TOOL_DEFS: Array<{
   {
     name: "send_prompt",
     description:
-      "Queue a follow-up prompt for a child session. If the session is idle, prompt processing starts immediately.",
+      "Queue a follow-up prompt for a session. If idle, processing starts immediately. Use messageKind=report for informational handoffs that may be consumed mid-turn; instructions/questions/errors retain normal turn delivery. Send material changes once; avoid acknowledgements and routine progress. Use the final response for automatic completion notifications instead of a duplicate send.",
     inputSchema: {
       type: "object",
       properties: {
@@ -343,6 +365,16 @@ export const META_AGENT_TOOL_DEFS: Array<{
         prompt: {
           type: "string",
           description: "The follow-up prompt to send.",
+        },
+        messageKind: {
+          type: "string",
+          enum: ["instruction", "report", "status", "question", "error"],
+          description: "Defaults to instruction. report/status are informational context that the recipient can consume mid-turn; never label a request to change work as a report.",
+        },
+        interrupt: {
+          type: "boolean",
+          description:
+            "Optional. If true, stop the session's current turn and start processing the queue immediately instead of waiting for the turn to finish. The interrupted turn's work is lost, so use this only when the new prompt makes the current one obsolete. Ignored for a session waiting on an interactive prompt (use respond_to_prompt) or a terminal-backed CLI session; the result reports interrupted/interruptSkippedReason. The queue drains oldest-first, so if the session already has queued prompts this delivers the oldest one, not necessarily yours.",
         },
       },
       required: ["sessionId", "prompt"],
@@ -437,7 +469,7 @@ export const META_AGENT_TOOL_DEFS: Array<{
  * SSE MCP server and discover the tools via ListTools. The two paths share
  * `META_AGENT_TOOL_DEFS` so descriptions stay in sync.
  */
-// Extension-agent meta-agents (e.g. gemini-antigravity) receive their meta-agent
+// Tool-loop meta-agents (e.g. Gemini) receive their meta-agent
 // tools through this OpenAI-shaped list. Built-in providers (claude-code,
 // openai-codex) instead discover tools over the SSE MCP server and are gated by
 // BaseAgentProvider.META_AGENT_ALLOWED_TOOLS, which deliberately OMITS
@@ -480,8 +512,9 @@ export function getMetaAgentOpenAITools(): MetaAgentOpenAITool[] {
  * (extension-agent providers) so the dispatch logic lives in exactly one place.
  *
  * `name` may carry the `mcp__nimbalyst-host__` prefix; it is stripped.
- * `workspaceId` is normalized to its canonical repo path via resolveProjectPath
- * so worktree-rooted callers still resolve to the parent repo.
+ * `workspaceId` is resolved to the caller's project via
+ * resolveCallerWorkspaceId, so a worktree-rooted caller still lands on the
+ * parent repo while keeping the spelling that repo was opened by (#1551).
  *
  * Throws if the tool fns are not yet registered or the tool name is unknown.
  */
@@ -495,9 +528,12 @@ export async function dispatchMetaAgentTool(
     throw new Error("Meta-agent service not initialized");
   }
   const toolName = name.replace(/^mcp__nimbalyst-[a-z-]+__/, "");
-  // Normalize the workspaceId to its canonical repo path (worktree callers
-  // pass the worktree dir; sessions compare by exact parent-repo path).
-  const effectiveWorkspaceId = resolveProjectPath(workspaceId);
+  // Resolve the caller to its project (worktree callers pass the worktree dir),
+  // preserving the as-opened spelling where the filesystem can confirm it.
+  // Sessions and windows are keyed by that spelling; the service still compares
+  // identities rather than strings, so a caller whose alias cannot be
+  // reconstructed here is matched against the stored path's identity instead.
+  const effectiveWorkspaceId = resolveCallerWorkspaceId(workspaceId);
 
   switch (toolName) {
     case "list_worktrees":
@@ -530,11 +566,14 @@ export async function dispatchMetaAgentTool(
         }
       );
     case "send_prompt":
+      if (args?.messageKind !== undefined && !['instruction', 'report', 'status', 'question', 'error'].includes(String(args.messageKind))) throw new Error('Invalid orchestration messageKind');
       return toolFns.sendPrompt(
         aiSessionId,
         effectiveWorkspaceId,
         (args?.sessionId as string) ?? "",
-        (args?.prompt as string) ?? ""
+        (args?.prompt as string) ?? "",
+        args?.interrupt === true,
+        (args?.messageKind as OrchestrationMessageKind | undefined) ?? 'instruction'
       );
     case "notify_user":
       return toolFns.notifyUser(aiSessionId, effectiveWorkspaceId, (args ?? {}) as NotifyUserArgs);

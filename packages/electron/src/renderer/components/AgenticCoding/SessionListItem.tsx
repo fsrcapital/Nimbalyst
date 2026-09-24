@@ -1,13 +1,15 @@
+import { SessionProviderIcon } from './SessionProviderIcon';
 import React, { useState, useCallback, useEffect, useRef, useMemo, memo } from 'react';
-import { useAtomValue, useSetAtom } from 'jotai';
+import { atom, useAtomValue, useSetAtom } from 'jotai';
 import { MaterialSymbol } from '@nimbalyst/runtime/ui/icons/MaterialSymbol';
 import { WorktreeIcon } from '../common/WorktreeIcon';
 import { ProviderIcon } from '@nimbalyst/runtime/ui/icons/ProviderIcons';
 import { getRelativeTimeString } from '../../utils/dateFormatting';
 import { sessionOrChildProcessingAtom, sessionProcessingAtom, sessionUnreadAtom, sessionPendingPromptAtom, sessionHasPendingInteractivePromptAtom, sessionActiveSubagentCountAtom, reparentSessionAtom, refreshSessionListAtom, sessionShareAtom, sessionWakeupAtom, sessionLastActivityAtom } from '../../store';
-import { convertToWorkstreamAtom } from '../../store/atoms/sessions';
+import { convertToWorkstreamAtom, sessionRegistryAtom } from '../../store/atoms/sessions';
 import { SessionContextMenu } from './SessionContextMenu';
 import { FullTitleTooltip } from './FullTitleTooltip';
+import { settingAtom } from '../../store/atoms/settingAtomFamily';
 import { sessionAgentWakePendingAtom } from '../../store/atoms/teamInbox';
 import type { SessionAttentionReason } from '@nimbalyst/runtime';
 import { SessionWorkflowPopover } from './SessionWorkflowPopover';
@@ -92,7 +94,6 @@ export const SessionStatusIndicator = memo<{ sessionId: string; messageCount?: n
 export const SessionExecutionLabel = memo<{ sessionId: string; showIdle?: boolean }>(({ sessionId, showIdle = true }) => {
   const isProcessing = useAtomValue(sessionProcessingAtom(sessionId));
   const activeSubagentCount = useAtomValue(sessionActiveSubagentCountAtom(sessionId));
-
   const label = activeSubagentCount > 0
     ? `${activeSubagentCount} Subagent${activeSubagentCount === 1 ? '' : 's'} Working`
     : isProcessing
@@ -101,7 +102,6 @@ export const SessionExecutionLabel = memo<{ sessionId: string; showIdle?: boolea
         ? 'Idle'
         : '';
   if (!label) return null;
-
   return (
     <span
       className={`session-execution-label inline-flex items-center gap-1 whitespace-nowrap ${activeSubagentCount > 0 || isProcessing ? 'text-[var(--nim-primary)]' : 'text-[var(--nim-text-faint)]'}`}
@@ -109,6 +109,31 @@ export const SessionExecutionLabel = memo<{ sessionId: string; showIdle?: boolea
     >
       <MaterialSymbol icon={activeSubagentCount > 0 ? 'groups' : isProcessing ? 'smart_toy' : 'pause'} size={10} />
       {label}
+    </span>
+  );
+});
+
+// This leaf owns its expiry timer: following never ticks the parent or sibling rows.
+const EXTERNAL_ACTIVITY_RECENT_MS = 30_000;
+const SessionExternalMarker = memo(function SessionExternalMarker({ sessionId }: { sessionId: string }) {
+  const source = useAtomValue(useMemo(() => atom(get => get(sessionRegistryAtom).get(sessionId)?.externalSource), [sessionId]));
+  const lastActivity = useAtomValue(useMemo(() => atom(get => get(sessionRegistryAtom).get(sessionId)?.externalLastActivityAt), [sessionId]));
+  const enabled = useAtomValue(settingAtom('app.externalSessionFollowEnabled')) === true;
+  const [, expire] = useState(0);
+  const age = Date.now() - (lastActivity ?? 0);
+  const following = !!source && enabled && lastActivity !== undefined && age >= 0 && age < EXTERNAL_ACTIVITY_RECENT_MS;
+
+  useEffect(() => {
+    if (!following || lastActivity === undefined) return;
+    const timer = setTimeout(() => expire(value => value + 1), Math.max(0, lastActivity + EXTERNAL_ACTIVITY_RECENT_MS - Date.now()));
+    return () => clearTimeout(timer);
+  }, [source, enabled, lastActivity, following]);
+
+  if (!source) return null;
+  return (
+    <span className="session-list-item-external inline-flex gap-1 whitespace-nowrap text-[var(--nim-text-muted)]" title={`Imported from ${source === 'claude-code' ? 'Claude Code' : 'Codex'}`}>
+      <span>External</span>
+      {following && <span className="session-list-item-following text-[var(--nim-primary)]" title="Recent external session activity">Following</span>}
     </span>
   );
 });
@@ -543,7 +568,7 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
             <line x1="8.5" y1="5.2" x2="11.5" y2="10.8" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
           </svg>
         ) : (
-          <ProviderIcon provider={provider || 'claude'} size={16} />
+          <SessionProviderIcon sessionId={id} provider={provider} size={16} isActive={isActive} />
         )}
       </div>
       {isPinned && (
@@ -579,6 +604,7 @@ export const SessionListItem = memo<SessionListItemProps>(function SessionListIt
               <span className="session-list-item-datetime text-[0.6875rem] text-[var(--nim-text-faint)] whitespace-nowrap transition-colors duration-150" title={fullDateTime}>{relativeTime}</span>
               {displayModel && <span className="session-list-item-model overflow-hidden text-ellipsis whitespace-nowrap">{displayModel}</span>}
               {phase && <SessionPhaseBadge phase={phase} />}
+              <SessionExternalMarker sessionId={id} />
             </div>
             <div className="session-list-item-runtime mt-0.5 flex min-w-0 items-center gap-2 text-[0.625rem]">
               <SessionExecutionLabel sessionId={id} />

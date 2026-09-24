@@ -1,3 +1,4 @@
+import {selectedMachineAtom, machineSessionSelectionsAtom} from './remoteMachines';
 /**
  * AI Session Atoms
  *
@@ -17,9 +18,16 @@
 import { atom } from 'jotai';
 import { atomFamily } from '../debug/atomFamilyRegistry';
 import { store } from '@nimbalyst/runtime/store';
-import { ModelIdentifier, type ChatAttachment, type SessionData, type TranscriptViewMessage } from '@nimbalyst/runtime/ai/server/types';
+import { ModelIdentifier, type ChatAttachment, type SessionData } from '@nimbalyst/runtime/ai/server/types';
 import type { SessionMeta } from '@nimbalyst/runtime';
 import deepEqual from 'fast-deep-equal';
+import { captureTranscriptMessages, reconcileTranscriptMessages } from '../transcriptReconciliation';
+import { sessionLaunchCountsAtom } from './sessionLaunchCounts';
+import { sessionListMetadata } from './sessionListMetadata';
+
+export function mapSessionListEntryToMeta(s: any, workspacePath: string): SessionMeta {
+  return sessionListMetadata(s, workspacePath);
+}
 import { workstreamStateAtom, setWorkstreamActiveChildAtom } from './workstreamState';
 import { aiInputHistoryAtom } from './aiInputUndo';
 
@@ -332,22 +340,46 @@ export function isInteractivePromptTool(toolName: string): boolean {
   return !!match && INTERACTIVE_PROMPT_TOOLS.has(match[1]);
 }
 
+/**
+ * Whether any interactive prompt in this transcript is still answerable.
+ *
+ * "No result yet" is not sufficient on its own. Typing a new prompt while a
+ * prompt widget is up aborts the turn, and the abort leaves the tool_use
+ * permanently unmatched -- no tool_result is ever written for it. Deriving
+ * pending purely from the missing result pinned the amber "waiting for your
+ * response" indicator on sessions that were actively running, because the
+ * derivation re-runs from message history on every transcript mount and kept
+ * rediscovering the dead prompt. (#871 fixed the same symptom on the persisted
+ * `hasPendingPrompt` bit; this is the message-derived twin.)
+ *
+ * A `user_message` after the prompt is the abandonment signal: the user chose
+ * to type instead of answering, so the prompt can never be resolved. Nothing
+ * else is treated as abandonment -- notably not `turn_ended`, because a prompt
+ * backgrounded at the harness's 120s tool timeout outlives its turn and stays
+ * answerable (see #1341 and `isStrandedPromptAck` in TranscriptProjector).
+ */
+export function hasUnansweredInteractivePrompt(
+  messages: Array<{ type?: string; interactivePrompt?: { status?: string }; toolCall?: { toolName?: string; result?: unknown } }>
+): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    // Everything before the last user message was superseded by it.
+    if (msg.type === 'user_message') return false;
+    // Interactive prompts projected from canonical events
+    if (msg.type === 'interactive_prompt' && msg.interactivePrompt?.status === 'pending') return true;
+    // Interactive tools stored as tool_calls (from TranscriptTransformer)
+    if (msg.toolCall?.toolName && isInteractivePromptTool(msg.toolCall.toolName) && !msg.toolCall.result) return true;
+  }
+  return false;
+}
+
 export const refreshPendingPromptsAtom = atom(
   null,
   (get, set, sessionId: string) => {
     // Pending prompts are now rendered from canonical transcript events via widgets.
     // Update the unified pending interactive prompt state from session messages.
     const messages = get(sessionMessagesAtom(sessionId));
-    const hasPendingPrompt = messages.some(
-      msg => {
-        // Interactive prompts projected from canonical events
-        if (msg.type === 'interactive_prompt' && msg.interactivePrompt?.status === 'pending') return true;
-        // Interactive tools stored as tool_calls (from TranscriptTransformer)
-        if (msg.toolCall?.toolName && isInteractivePromptTool(msg.toolCall.toolName) && !msg.toolCall.result) return true;
-        return false;
-      }
-    );
-    set(sessionHasPendingInteractivePromptAtom(sessionId), hasPendingPrompt);
+    set(sessionHasPendingInteractivePromptAtom(sessionId), hasUnansweredInteractivePrompt(messages));
   }
 );
 
@@ -648,6 +680,10 @@ export interface OpenSession {
 export const sessionStoreAtom = atomFamily((_sessionId: string) =>
   atom<SessionData | null>(null)
 );
+
+export const sessionRemoteHostAtom = atomFamily((sessionId: string) => atom(get =>
+  get(sessionRegistryAtom).get(sessionId)?.remoteHostDeviceId ?? get(sessionStoreAtom(sessionId))?.metadata?.remoteHostDeviceId
+));
 
 /**
  * @deprecated Use sessionStoreAtom instead
@@ -972,6 +1008,15 @@ export const sessionEffortLevelRawAtom = atomFamily((sessionId: string) =>
   })
 );
 
+/** OpenCode session role (an `app.agents` primary agent), or null for its default. */
+export const sessionOpenCodeRoleAtom = atomFamily((sessionId: string) =>
+  atom((get) => {
+    const metadata = get(sessionStoreAtom(sessionId))?.metadata as Record<string, unknown> | undefined;
+    const role = metadata?.opencodeAgent;
+    return typeof role === 'string' && role.trim().length > 0 ? role : null;
+  })
+);
+
 export const sessionThinkingModeRawAtom = atomFamily((sessionId: string) =>
   atom((get) => {
     const metadata = get(sessionStoreAtom(sessionId))?.metadata as Record<string, unknown> | undefined;
@@ -1165,6 +1210,7 @@ export const loadSessionChildrenAtom = atom(
           if (!registry.has(child.id)) {
             registry.set(child.id, {
               id: child.id,
+              remoteHostDeviceId: child.remoteHostDeviceId,
               title: child.title || 'Untitled Session',
               createdAt: child.createdAt,
               updatedAt: child.updatedAt,
@@ -1289,6 +1335,7 @@ export const createChildSessionAtom = atom(
         // This prevents showing default values before loadSessionDataAtom runs
         set(sessionStoreAtom(result.sessionId), {
           id: result.sessionId,
+          ...(result.remoteHostDeviceId ? {metadata: {remoteHostDeviceId: result.remoteHostDeviceId}} : {}),
           title: 'New Session',
           provider: resolvedProvider,
           model: model || 'claude-code:sonnet',
@@ -1526,6 +1573,9 @@ export const convertToWorkstreamAtom = atom(
           },
         },
         workspaceId: workspacePath,
+        // The app manufactures this root to hold sessions the user already
+        // made; nobody asked for a new session, so it must not read as one.
+        launchSource: 'workstream_convert',
       });
 
       if (!createResult.success || !createResult.id) {
@@ -1755,6 +1805,7 @@ export const loadSessionDataAtom = atom(
     const draftWasHydrated = get(sessionDraftHydratedAtom(sessionId));
     const draftModifiedAtStart = get(sessionDraftLocalModifiedAtAtom(sessionId));
 
+    const messagesAtStart = captureTranscriptMessages(get(sessionStoreAtom(sessionId))?.messages ?? []);
     const loadPromise = (async () => {
     try {
       const sessionData = await window.electronAPI.aiLoadSession(sessionId, workspacePath);
@@ -1765,6 +1816,10 @@ export const loadSessionDataAtom = atom(
           console.warn(`[sessions] Session ${sessionId} has invalid model "${model}" - this indicates a bug in session creation`);
         }
 
+        sessionData.messages = reconcileTranscriptMessages(
+          get(sessionStoreAtom(sessionId))?.messages ?? [], sessionData.messages ?? [],
+          { startedWith: messagesAtStart },
+        );
         // Set sessionStoreAtom - derived atoms (mode, model, archived) will automatically sync
         set(sessionStoreAtom(sessionId), sessionData);
 
@@ -1927,6 +1982,7 @@ export const reloadSessionDataAtom = atom(
     const currentVersion = (existingPending?.version || 0) + 1;
     const thisReload = { version: currentVersion, aborted: false };
     pendingReloads.set(sessionId, thisReload);
+    const messagesAtStart = captureTranscriptMessages(get(sessionStoreAtom(sessionId))?.messages ?? []);
 
     try {
       const sessionData = await window.electronAPI.aiLoadSession(sessionId, workspacePath);
@@ -1939,48 +1995,10 @@ export const reloadSessionDataAtom = atom(
       if (sessionData) {
         const current = get(sessionStoreAtom(sessionId));
 
-        // Merge messages: preserve local-only optimistic messages not yet in database.
-        // Optimistic messages (added in-memory by the renderer before the provider
-        // persists them) have negative IDs (id < 0). They must be preserved across
-        // DB reloads so chat bubbles don't flicker away while waiting for the
-        // provider to persist the canonical version.
+        sessionData.messages = reconcileTranscriptMessages(
+          current?.messages ?? [], sessionData.messages ?? [], { startedWith: messagesAtStart },
+        );
         if (current) {
-          const dbMessages = sessionData.messages || [];
-          const localMessages = current.messages || [];
-
-          // Collect optimistic messages (negative IDs) that aren't yet in the DB.
-          // These were added locally before the provider persisted them.
-          // Drop any optimistic message whose type+text matches a DB message
-          // with a similar timestamp (within 5s tolerance). The timestamp check
-          // avoids premature eviction when a user sends two identical messages
-          // (e.g. "yes" twice). Use safe getTime() in case createdAt is a string
-          // after IPC serialization rather than a Date object.
-          const safeGetTime = (d: Date | string | unknown): number => {
-            if (d instanceof Date) return d.getTime();
-            if (typeof d === 'string') return new Date(d).getTime();
-            return 0;
-          };
-          const optimisticMessages = localMessages.filter(
-            (m: TranscriptViewMessage) =>
-              m.id < 0 &&
-              !dbMessages.some(
-                (db: TranscriptViewMessage) =>
-                  db.type === m.type &&
-                  db.text === m.text &&
-                  Math.abs(safeGetTime(db.createdAt) - safeGetTime(m.createdAt)) < 5000
-              )
-          );
-
-          if (optimisticMessages.length > 0) {
-            // Append optimistic messages after DB messages so they appear at
-            // the correct position (end of transcript). They'll be naturally
-            // replaced on the next reload once the provider has persisted
-            // canonical versions with real positive IDs.
-            sessionData.messages = [...dbMessages, ...optimisticMessages];
-          } else {
-            sessionData.messages = dbMessages;
-          }
-
           // Preserve read state
           const preservedTimestamp = current.lastReadMessageTimestamp || 0;
           const dbTimestamp = sessionData.lastReadMessageTimestamp || 0;
@@ -2098,6 +2116,16 @@ export const markSessionReadAtom = atom(null, (get, set, sessionId: string) => {
 });
 
 /**
+ * Mark several sessions as read at once (e.g. a whole workstream).
+ * Deduplicates so a parent id that also appears in its child list is only sent once.
+ */
+export const markSessionsReadAtom = atom(null, (get, set, sessionIds: string[]) => {
+  for (const sessionId of new Set(sessionIds)) {
+    set(markSessionReadAtom, sessionId);
+  }
+});
+
+/**
  * Set session as active.
  * Also marks it as read.
  */
@@ -2132,9 +2160,11 @@ export const sessionListRootAtom = atom<SessionListItem[]>((get) => {
   const registry = get(sessionRegistryAtom);
   const workspacePath = get(sessionListWorkspaceAtom) || '';
   const showArchived = get(showArchivedSessionsAtom);
+  const host = get(selectedMachineAtom(workspacePath));
 
   return Array.from(registry.values())
     .filter(s => {
+      if ((s.remoteHostDeviceId ?? "") !== host) return false;
       if (!showArchived && s.isArchived) return false;
       // Meta-agent sessions are included - they're rendered via MetaAgentGroup in SessionHistory
       if (s.agentRole === 'meta-agent') return true;
@@ -2193,44 +2223,7 @@ export const showArchivedSessionsAtom = atom<boolean>(false);
  *   If provided, uses this value instead of reading from showArchivedSessionsAtom.
  *   This avoids race conditions when the atom is updated but not yet committed.
  */
-export function mapSessionListEntryToMeta(s: any, workspacePath: string): SessionMeta {
-  return {
-    id: s.id,
-    title: s.title || 'Untitled Session',
-    createdAt: s.createdAt,
-    updatedAt: s.updatedAt,
-    provider: s.provider || 'claude',
-    model: s.model,
-    mode: s.mode || null,
-    sessionType: s.sessionType || 'session',
-    agentRole: s.agentRole || 'standard',
-    createdBySessionId: s.createdBySessionId || null,
-    messageCount: s.messageCount || 0,
-    workspaceId: workspacePath,
-    isArchived: s.isArchived || false,
-    isPinned: s.isPinned || false,
-    parentSessionId: s.parentSessionId || null,
-    worktreeId: s.worktreeId || null,
-    childCount: s.childCount || 0,
-    uncommittedCount: s.uncommittedCount || 0,
-    ...(s.phase && { phase: s.phase }),
-    ...(s.tags && { tags: s.tags }),
-    ...(s.linkedTrackerItemIds && { linkedTrackerItemIds: s.linkedTrackerItemIds }),
-    ...(s.agentRole && { agentRole: s.agentRole }),
-    ...(s.createdBySessionId !== undefined && { createdBySessionId: s.createdBySessionId }),
-    ...(typeof s.cacheWarmEnabled === 'boolean' && { cacheWarmEnabled: s.cacheWarmEnabled }),
-    ...(typeof s.cacheWarmNextAt === 'number' && { cacheWarmNextAt: s.cacheWarmNextAt }),
-    ...(typeof s.cacheWarmLastAt === 'number' && { cacheWarmLastAt: s.cacheWarmLastAt }),
-    ...((s.cacheWarmLastStatus === 'success' || s.cacheWarmLastStatus === 'failed') && {
-      cacheWarmLastStatus: s.cacheWarmLastStatus,
-    }),
-    ...(typeof s.myNotes === 'string' && { myNotes: s.myNotes }),
-    ...(typeof s.nextAction === 'string' && { nextAction: s.nextAction }),
-    ...(typeof s.waitingOn === 'string' && { waitingOn: s.waitingOn }),
-    ...(Array.isArray(s.attentionReasons) && { attentionReasons: s.attentionReasons }),
-    ...(typeof s.needsAttention === 'boolean' && { needsAttention: s.needsAttention }),
-  };
-}
+let sessionListRefreshVersion = 0;
 
 export const refreshSessionListAtom = atom(
   null,
@@ -2240,6 +2233,7 @@ export const refreshSessionListAtom = atom(
       return;
     }
 
+    const refreshVersion = ++sessionListRefreshVersion;
     const showArchived = includeArchivedOverride ?? get(showArchivedSessionsAtom);
 
     try {
@@ -2248,11 +2242,13 @@ export const refreshSessionListAtom = atom(
         includeArchived: showArchived,
       });
 
+      if (get(sessionListWorkspaceAtom) !== workspacePath || refreshVersion !== sessionListRefreshVersion) return;
+
       if (result.success && Array.isArray(result.sessions)) {
         // Map IPC results directly into registry (single pass, no intermediate type)
         const registry = new Map<string, SessionMeta>();
         for (const s of result.sessions) {
-          registry.set(s.id, mapSessionListEntryToMeta(s, workspacePath));
+          registry.set(s.id, sessionListMetadata(s, workspacePath));
 
           // Initialize unread state from database metadata (for cross-device sync)
           if (s.hasUnread) {
@@ -2267,11 +2263,12 @@ export const refreshSessionListAtom = atom(
         }
 
         set(sessionRegistryAtom, registry);
+        set(sessionLaunchCountsAtom, result.launchedSessionCounts ?? {});
       }
     } catch (error) {
       console.error('[sessions] Failed to refresh session list:', error);
     } finally {
-      set(sessionListLoadingAtom, false);
+      if (refreshVersion === sessionListRefreshVersion) set(sessionListLoadingAtom, false);
     }
   }
 );
@@ -2301,6 +2298,7 @@ export async function initSessionList(workspacePath: string): Promise<void> {
   }
 
   lastInitWorkspacePath = workspacePath;
+  if (store.get(sessionListWorkspaceAtom) !== workspacePath) store.set(sessionLaunchCountsAtom, {});
   store.set(sessionListWorkspaceAtom, workspacePath);
 
   // Trigger initial load and track the promise
@@ -2473,6 +2471,14 @@ export const setSelectedWorkstreamAtom = atom(
   }) => {
     const prev = get(selectedWorkstreamAtom(workspacePath));
     set(selectedWorkstreamAtom(workspacePath), selection);
+    if (selection) {
+      const session = get(sessionRegistryAtom).get(selection.id);
+      if (session) {
+        const host = session.remoteHostDeviceId ?? '';
+        set(selectedMachineAtom(workspacePath), host);
+        set(machineSessionSelectionsAtom(workspacePath), previous => ({...previous, [host]: selection.id}));
+      }
+    }
 
     // Fire the selection hook (e.g., exit kanban view).
     // This fires on EVERY selection, including re-selecting the same session,

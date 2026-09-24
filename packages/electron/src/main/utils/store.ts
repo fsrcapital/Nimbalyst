@@ -1,10 +1,15 @@
-import Store from 'electron-store';
+import { normalizeAIProviderOverrides } from './normalizeAIProviderOverrides';
+export { normalizeAIProviderOverrides } from './normalizeAIProviderOverrides';
+import { getProviderCredentials, subscribeProviderCredentialChanges } from '../services/credentials/providerCredentials';
+import { SAVED_CREDENTIAL } from '../../shared/providerCredentials';
+import Store from './privateSettingsStore';
 import { execSync } from 'child_process';
 import { existsSync } from 'fs';
 import * as path from 'path';
 import { RecentItem, SessionState, SessionWindow } from '../types';
 import { logger } from './logger';
 import { type EffortLevel, type ThinkingMode, parseEffortLevel, parseThinkingMode } from '@nimbalyst/runtime/ai/server/effortLevels';
+import type { FleetStatusStyle, IslandDisplayPreference } from '../../shared/menuBarIsland';
 import type { OnboardingConfig } from '../../shared/types/workspace';
 import { DEFAULT_ONBOARDING_CONFIG } from '../../shared/types/workspace';
 import { AlphaFeatureTag, getDefaultAlphaFeatures, ALPHA_FEATURES } from '../../shared/alphaFeatures';
@@ -17,6 +22,8 @@ import {
 } from '../../shared/orgProjectWalk';
 import { normalizeCodexProviderConfig, omitModelsField } from '@nimbalyst/runtime/ai/server/utils/modelConfigUtils';
 import { normalizeWebAppAccessConfig, type WebAppAccessConfig } from '../services/WebAppAccess';
+import { planWorkstreamStatePrune } from './workstreamStatePrune';
+import type { OpenCodeModelCatalogCache } from '@nimbalyst/runtime/ai/server';
 
 // Theme can be a built-in theme or an extension theme ID (format: "extensionId:themeId")
 export type AppTheme = 'dark' | 'light' | 'system' | 'auto' | 'crystal-dark' | string;
@@ -93,7 +100,11 @@ export interface PersistedWebPushState {
   subscriptions: PersistedWebPushSubscription[];
 }
 
+/** How the macOS menu bar fleet strip is drawn. See `getTrayStripStyle`. */
+export type TrayStripStyle = FleetStatusStyle;
+
 interface AppStoreSchema {
+  mobileSettingsVersion?: number;
   theme: AppTheme;
   themeIsDark?: boolean; // Whether the current theme is dark (used for extension themes)
   // The active theme's resolved --nim-bg, reported by the renderer once it has
@@ -175,6 +186,9 @@ interface AppStoreSchema {
   extensionProjectIntroShown?: boolean;
   // Extension settings (enabled/disabled state and configuration)
   extensionSettings?: Record<string, ExtensionSettings>;
+  // Last applied version of the one-time migration that pins legacy
+  // defaultEnabled:false Claude plugins on (see claudePluginDefaultEnabledMigration.ts).
+  claudePluginDefaultEnabledMigrationVersion?: number;
   // Global-scope privileged-extension capability grants ("Enable for all workspaces").
   // Workspace-scope grants live on WorkspaceState.extensionPermissionGrants.
   // See packages/electron/src/main/extensions/permissionGrantStore.ts for the
@@ -206,6 +220,18 @@ interface AppStoreSchema {
     // path retained as an escape hatch.
     transport?: 'sdk' | 'app-server';
   };
+  /**
+   * Legacy single-slot catalog from before per-workspace storage (#1382). Read
+   * once for the workspace it belongs to, never written; new writes go to
+   * openCodeModelCatalogCaches.
+   */
+  openCodeModelCatalogCache?: OpenCodeModelCatalogCache;
+  /**
+   * Live provider.list catalog per workspace, each keyed by OpenCode binary +
+   * auth identity. OpenCode resolves providers from project config, so one
+   * project's discovery is not an answer for another.
+   */
+  openCodeModelCatalogCaches?: Record<string, OpenCodeModelCatalogCache>;
   // Unified agent workflow registry source settings
   agentWorkflowSources?: {
     workspaceClaudeCompatibilityEnabled?: boolean;
@@ -278,6 +304,15 @@ interface AppStoreSchema {
   spellcheckLanguages?: string[];
   // System tray icon
   showTrayIcon?: boolean;
+  // macOS menu bar fleet-status strip, independent of the icon itself.
+  // A wide item is a real risk of overflowing under the notch on a laptop, so
+  // it can be turned off without losing the tray icon and its panel.
+  showTrayStrip?: boolean;
+  trayStripStyle?: TrayStripStyle;
+  // Which display the user dragged the menu bar island onto. Absent means the
+  // primary display, which is also the fallback when this names a monitor that
+  // is no longer connected.
+  islandDisplay?: IslandDisplayPreference;
   // Advanced: V8 heap memory limit in MB (default: 4096 = 4GB)
   // Increase if you experience OOM crashes with large sessions
   maxHeapSizeMB?: number;
@@ -518,7 +553,20 @@ export type { OnboardingConfig } from '../../shared/types/workspace';
 export type AgentFileScopeMode = 'current-changes' | 'session-files' | 'all-changes';
 
 export interface WorkspaceState {
+  remoteSessionDrafts?: Record<string, { text: string; options?: import("@nimbalyst/runtime/sync/types").RemoteTurnOptions; attachments: import("@nimbalyst/runtime/ai/server/types").ChatAttachment[] }>;
+  /** Explicit Cloudflare choices for this project; authentication stays in Wrangler. */
+  cloudflareSandboxSelection?: { profileName: string; accountId: string | null };
   workspacePath: string;
+  /**
+   * Additional top-level folders attached to this workspace, as absolute paths.
+   *
+   * Multi-root is asymmetric: `workspacePath` remains the workspace identity
+   * (settings key, tabs, sessions, trackers, collab org), and attached folders
+   * are extra roots the explorer shows, watchers watch, search fans out over,
+   * and AI sessions reach through `additionalDirectories`. An empty list is the
+   * single-folder workspace every user has today.
+   */
+  attachedFolders?: string[];
   windowState?: SessionWindow;
   // only when separate agentic coding window is open
   agenticCodingWindowState?: AgenticCodingWindowState;
@@ -612,6 +660,13 @@ export interface WorkspaceState {
   // exact mistake that made `LC-###` reissue numbers after items were acked or
   // deleted. A deleted item's number stays spent.
   localKeyCounter?: number;
+  // Whether the one-time repair for rows the old issue-key collision branch
+  // stranded has already run here. Persisted rather than per-process because
+  // the repair rewinds the item bootstrap cursor by however far the oldest
+  // stranded row sits behind it -- thousands of rows on a mature workspace --
+  // and that must happen once, not on every launch. See
+  // `runtime/src/sync/trackerIdentityRecovery.ts`.
+  trackerIdentityRecoveryAttempted?: boolean;
   // Account identity bound to this workspace (personalOrgId).
   // Set once when the workspace is first synced. Different workspaces can use different accounts.
   // Defaults to the account selected for personal sync if not set.
@@ -716,6 +771,104 @@ function getWorkspaceStore(): Store<Record<string, WorkspaceState>> {
   return _workspaceStore;
 }
 
+/**
+ * Read-through cache over the workspace store's on-disk JSON.
+ *
+ * `conf` has no cache: its `get store()` runs `readFileSync` + `JSON.parse`
+ * on *every* `.get()`. That is ~19ms of synchronous main-thread time against
+ * a 7.5MB `workspace-settings.json`, and `getWorkspaceState` sits on the hot
+ * path for team resolution and document sync (see `getLocalOrgBinding`), so
+ * the cost lands in the event loop dozens of times per user action.
+ *
+ * The main process is the only writer of this file within a userData dir --
+ * each dev instance gets its own -- so a process-local cache cannot go stale.
+ * Every write goes through `writeWorkspaceEntry`, which keeps the two in step.
+ */
+let _workspaceStoreCache: Record<string, WorkspaceState> | null = null;
+subscribeProviderCredentialChanges(() => { _workspaceStoreCache = null; });
+
+function readWorkspaceStore(): Record<string, WorkspaceState> {
+  if (!_workspaceStoreCache) {
+    _workspaceStoreCache = getWorkspaceStore().store ?? {};
+  }
+  return _workspaceStoreCache;
+}
+
+function writeWorkspaceEntry(key: string, value: WorkspaceState): void {
+  getWorkspaceStore().set(key, value);
+  // Populate rather than invalidate: the next read is almost always for the
+  // key just written, and re-reading would pay the full parse again.
+  readWorkspaceStore()[key] = value;
+}
+
+/**
+ * Drop the cache so the next read comes from disk. For tests and for any
+ * path that mutates the file outside `writeWorkspaceEntry`.
+ */
+export function invalidateWorkspaceStoreCache(): void {
+  _workspaceStoreCache = null;
+}
+
+/**
+ * Workspaces still carrying legacy offline collab edits in their settings.
+ *
+ * `collabPendingUpdates` predates `CollabDocumentReplicaStore`; the migration
+ * off it only ran when the specific document was reopened, so blobs for
+ * documents nobody revisited sat here for months inflating every read and
+ * write of the settings file. This lets a startup pass find them all.
+ */
+export function listLegacyPendingUpdateWorkspaces(): Array<{
+  workspacePath: string;
+  pending: Record<string, { mergedUpdateBase64: string; updatedAt: number }>;
+}> {
+  const out: Array<{
+    workspacePath: string;
+    pending: Record<string, { mergedUpdateBase64: string; updatedAt: number }>;
+  }> = [];
+
+  for (const state of Object.values(readWorkspaceStore())) {
+    const pending = state?.collabPendingUpdates;
+    if (!pending || Object.keys(pending).length === 0) continue;
+    if (!state.workspacePath) continue;
+    out.push({ workspacePath: state.workspacePath, pending });
+  }
+
+  return out;
+}
+
+/**
+ * Evict per-workstream UI state for sessions that no longer exist.
+ *
+ * Entries accumulated one per workstream and were never removed, so the
+ * settings file carried thousands of them. `conf` rewrites the entire file on
+ * every `set`, so the dead entries were paid for on each persist. Callers pass
+ * the live session ids; an empty set is treated as no-information and prunes
+ * nothing (see `planWorkstreamStatePrune`).
+ */
+export function pruneWorkstreamStates(
+  liveSessionIds: ReadonlySet<string>
+): { workspacesTouched: number; entriesRemoved: number } {
+  let workspacesTouched = 0;
+  let entriesRemoved = 0;
+
+  for (const [key, state] of Object.entries(readWorkspaceStore())) {
+    const plan = planWorkstreamStatePrune(
+      state?.workstreamStates as Record<string, unknown> | undefined,
+      liveSessionIds
+    );
+    if (plan.remove.length === 0) continue;
+
+    const next = cloneWorkspaceState(state);
+    for (const id of plan.remove) delete (next.workstreamStates ?? {})[id];
+    writeWorkspaceEntry(key, next);
+
+    workspacesTouched++;
+    entriesRemoved += plan.remove.length;
+  }
+
+  return { workspacesTouched, entriesRemoved };
+}
+
 const DEFAULT_TAB_MANAGER_STATE: TabManagerState = {
   tabs: [],
   activeTabId: null,
@@ -739,6 +892,47 @@ function workspaceKey(workspacePath: string): string {
   const normalized = path.normalize(workspacePath).replace(/\/+$/, '');
   const base64 = Buffer.from(normalized).toString('base64url');
   return `ws:${base64}`;
+}
+
+/**
+ * Soft cap on attached folders. Each attached folder costs a recursive file
+ * watcher, an event bus, and a git-ref watcher per discovered repo, so this
+ * matches the rail's warm-project limit until watcher cost is measured.
+ */
+export const MAX_ATTACHED_FOLDERS = 8;
+
+/**
+ * Normalize a root path the same way `workspaceKey` does, so the primary root
+ * and an attached folder that differ only by a trailing slash compare equal.
+ */
+function normalizeRootPath(rootPath: string): string {
+  return path.normalize(rootPath).replace(/\/+$/, '');
+}
+
+/**
+ * Drop malformed, duplicate, and self-referential entries from a persisted
+ * attached-folder list. Deliberately does NOT truncate to the cap: state
+ * written by a build with a higher cap is the user's data, not corruption.
+ */
+function sanitizeAttachedFolders(raw: unknown, workspacePath: string): string[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const primary = normalizeRootPath(workspacePath);
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string' || !entry.trim()) {
+      continue;
+    }
+    const normalized = normalizeRootPath(entry);
+    if (normalized === primary || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
 }
 
 /**
@@ -781,6 +975,7 @@ function deepMerge<T extends Record<string, any>>(target: T, source: any): T {
 function createDefaultWorkspaceState(workspacePath: string): WorkspaceState {
   return {
     workspacePath,
+    attachedFolders: [],
     windowState: undefined,
     agenticCodingWindowState: undefined,
     activeMode: undefined,
@@ -811,6 +1006,7 @@ function createDefaultWorkspaceState(workspacePath: string): WorkspaceState {
     issueKeyPrefix: deriveIssueKeyPrefix(workspacePath),
     localKeyPrefix: undefined,
     localKeyCounter: undefined,
+    trackerIdentityRecoveryAttempted: undefined,
     lastUpdated: Date.now(),
   };
 }
@@ -853,6 +1049,8 @@ function normalizeWorkspaceState(raw: any, wsPath: string): WorkspaceState {
     state.recentDocuments = state.recentDocuments.slice(0, 50);
   }
 
+  state.attachedFolders = sanitizeAttachedFolders(state.attachedFolders, wsPath);
+
   // Ensure tabs has required structure
   if (!state.tabs || typeof state.tabs !== 'object') {
     state.tabs = { ...DEFAULT_TAB_MANAGER_STATE };
@@ -890,10 +1088,10 @@ function cloneWorkspaceState(state: WorkspaceState): WorkspaceState {
 
 function ensureWorkspaceState(path: string): WorkspaceState {
   const key = workspaceKey(path);
-  const raw = getWorkspaceStore().get(key);
+  const raw = readWorkspaceStore()[key];
   const normalized = normalizeWorkspaceState(raw, path);
   if (!raw) {
-    getWorkspaceStore().set(key, cloneWorkspaceState(normalized));
+    writeWorkspaceEntry(key, cloneWorkspaceState(normalized));
   }
   return normalized;
 }
@@ -901,7 +1099,7 @@ function ensureWorkspaceState(path: string): WorkspaceState {
 function persistWorkspaceState(path: string, state: WorkspaceState): WorkspaceState {
   const key = workspaceKey(path);
   const next = cloneWorkspaceState({ ...state, lastUpdated: Date.now() });
-  getWorkspaceStore().set(key, next);
+  writeWorkspaceEntry(key, next);
   return next;
 }
 
@@ -1135,11 +1333,70 @@ export function updateWorkspaceState(
  */
 export function getTakenLocalKeyPrefixes(excludeWorkspacePath?: string): string[] {
   const excludeKey = excludeWorkspacePath ? workspaceKey(excludeWorkspacePath) : null;
-  const all = getWorkspaceStore().store ?? {};
+  const all = readWorkspaceStore();
   return Object.entries(all)
     .filter(([key]) => key.startsWith('ws:') && key !== excludeKey)
     .map(([, state]) => state?.localKeyPrefix)
     .filter((prefix): prefix is string => typeof prefix === 'string' && prefix.length > 0);
+}
+
+/**
+ * Folders attached to this workspace, absolute and normalized. Never includes
+ * the primary root.
+ */
+export function getAttachedFolders(workspacePath: string): string[] {
+  return getWorkspaceState(workspacePath).attachedFolders ?? [];
+}
+
+/**
+ * Every root this workspace spans: the primary root first, then attached
+ * folders in attachment order. Explorer order, search order, and watcher
+ * registration all read this, so "primary first" is the single definition of
+ * root ordering.
+ */
+export function getWorkspaceRoots(workspacePath: string): string[] {
+  return [normalizeRootPath(workspacePath), ...getAttachedFolders(workspacePath)];
+}
+
+export type AttachFolderResult =
+  | { ok: true; attachedFolders: string[] }
+  | { ok: false; reason: 'already-attached' | 'is-primary-root' | 'cap-reached'; attachedFolders: string[] };
+
+/**
+ * Attach a folder to the workspace. Idempotent: attaching a folder that is
+ * already a root reports why rather than duplicating it.
+ */
+export function attachFolderToWorkspace(workspacePath: string, folderPath: string): AttachFolderResult {
+  const normalized = normalizeRootPath(folderPath);
+  const primary = normalizeRootPath(workspacePath);
+  const current = getAttachedFolders(workspacePath);
+
+  if (normalized === primary) {
+    return { ok: false, reason: 'is-primary-root', attachedFolders: current };
+  }
+  if (current.includes(normalized)) {
+    return { ok: false, reason: 'already-attached', attachedFolders: current };
+  }
+  if (current.length >= MAX_ATTACHED_FOLDERS) {
+    return { ok: false, reason: 'cap-reached', attachedFolders: current };
+  }
+
+  const next = updateWorkspaceState(workspacePath, state => {
+    state.attachedFolders = [...(state.attachedFolders ?? []), normalized];
+  });
+  return { ok: true, attachedFolders: next.attachedFolders ?? [] };
+}
+
+/**
+ * Detach a folder. Tabs opened from it stay open -- they are files, not the
+ * folder -- so this only removes the root from the workspace.
+ */
+export function detachFolderFromWorkspace(workspacePath: string, folderPath: string): string[] {
+  const normalized = normalizeRootPath(folderPath);
+  const next = updateWorkspaceState(workspacePath, state => {
+    state.attachedFolders = (state.attachedFolders ?? []).filter(entry => entry !== normalized);
+  });
+  return next.attachedFolders ?? [];
 }
 
 export function getWorkspaceRecentFiles(workspacePath: string): string[] {
@@ -1327,16 +1584,23 @@ export function saveAgentFileScopeMode(workspacePath: string, mode: AgentFileSco
 
 // AI Provider Override State Management
 export function getAIProviderOverrides(workspacePath: string): AIProviderOverrides | undefined {
-  const overrides = getWorkspaceState(workspacePath).aiProviderOverrides;
-  return normalizeAIProviderOverrides(overrides);
+  const credentials = getProviderCredentials().snapshot().credentials;
+  const overrides = structuredClone(getWorkspaceState(workspacePath).aiProviderOverrides ?? {});
+  for (const config of Object.values(overrides.providers ?? {})) delete config.apiKey;
+  for (const credential of credentials) {
+    if (credential.workspacePath !== path.normalize(workspacePath).replace(/\/+$/, '')) continue;
+    overrides.providers ??= {};
+    overrides.providers[credential.name] ??= {};
+    overrides.providers[credential.name].apiKey = SAVED_CREDENTIAL;
+  }
+  return Object.keys(overrides).length ? normalizeAIProviderOverrides(overrides) : undefined;
 }
 
 /**
- * Lazily-opened `ai-settings` electron-store (where provider API keys live —
- * `apiKeys`). Separate from the `app-settings` store exported as `store`.
+ * Lazily-opened non-secret AI settings, separate from the global app settings.
  */
 let _aiSettingsStore: Store<Record<string, unknown>> | null = null;
-function getAiSettingsStore(): Store<Record<string, unknown>> {
+export function getAiSettingsStore(): Store<Record<string, unknown>> {
   if (!_aiSettingsStore) {
     _aiSettingsStore = new Store<Record<string, unknown>>({ name: 'ai-settings' });
   }
@@ -1345,38 +1609,46 @@ function getAiSettingsStore(): Store<Record<string, unknown>> {
 
 /**
  * Resolve a provider API key from EXPLICIT settings only — a per-workspace
- * project override if present, else the global `ai-settings` `apiKeys[providerId]`.
+ * project override if present, else the global encrypted credential.
  * NEVER reads `process.env` (CLAUDE.md no-implicit-env-key rule). Returns null
  * when not configured. Mirrors `AIService.getApiKeyForProvider` so the
  * backend-module `getApiKey` broker hands an extension engine the same key the
- * AI providers use (the key lives in `ai-settings`, NOT `app-settings`).
+ * AI providers use.
  */
-export function getProviderApiKeyFromSettings(
-  providerId: string,
-  workspacePath?: string
-): string | null {
-  if (workspacePath) {
-    const overrideKey = getAIProviderOverrides(workspacePath)?.providers?.[providerId]?.apiKey;
-    if (typeof overrideKey === 'string' && overrideKey.length > 0) {
-      return overrideKey;
-    }
-  }
-  const apiKeys = getAiSettingsStore().get('apiKeys') as Record<string, string> | undefined;
-  const key = apiKeys?.[providerId];
-  return typeof key === 'string' && key.length > 0 ? key : null;
+export function getProviderApiKeyFromSettings(providerId: string, workspacePath?: string): string | null {
+  const credentials = getProviderCredentials();
+  const override = workspacePath ? credentials.get(providerId, { workspacePath }) : undefined;
+  return override ?? credentials.get(providerId === 'claude' ? 'anthropic' : providerId) ?? null;
 }
 
 export function saveAIProviderOverrides(workspacePath: string, overrides: AIProviderOverrides | undefined): void {
-  const normalizedOverrides = normalizeAIProviderOverrides(overrides);
-  updateWorkspaceState(workspacePath, workspace => {
-    workspace.aiProviderOverrides = normalizedOverrides;
-  });
+  const next = structuredClone(normalizeAIProviderOverrides(overrides));
+  const snapshot = getProviderCredentials().snapshot();
+  if (snapshot.state !== 'available') throw new Error(snapshot.message);
+  for (const credential of snapshot.credentials) {
+    if (credential.workspacePath === path.normalize(workspacePath).replace(/\/+$/, '') && !Object.prototype.hasOwnProperty.call(next?.providers ?? {}, credential.name)) {
+      getProviderCredentials().delete(credential.name, { workspacePath });
+    }
+  }
+  for (const [name, config] of Object.entries(next?.providers ?? {})) {
+    if (config.apiKey !== undefined && config.apiKey !== SAVED_CREDENTIAL) {
+      if (config.apiKey) getProviderCredentials().set(name, config.apiKey, { workspacePath });
+      else getProviderCredentials().delete(name, { workspacePath });
+    }
+    delete config.apiKey;
+  }
+  updateWorkspaceState(workspacePath, workspace => { workspace.aiProviderOverrides = next; });
 }
 
 export function clearAIProviderOverrides(workspacePath: string): void {
-  updateWorkspaceState(workspacePath, workspace => {
-    delete workspace.aiProviderOverrides;
-  });
+  const snapshot = getProviderCredentials().snapshot();
+  if (snapshot.state !== 'available') throw new Error(snapshot.message);
+  for (const credential of snapshot.credentials) {
+    if (credential.workspacePath === path.normalize(workspacePath).replace(/\/+$/, '')) {
+      getProviderCredentials().delete(credential.name, { workspacePath });
+    }
+  }
+  updateWorkspaceState(workspacePath, workspace => { delete workspace.aiProviderOverrides; });
 }
 
 // Tracker Automation Override State Management
@@ -1443,42 +1715,6 @@ export function getEffectiveGhAccount(workspacePath?: string): string | undefine
     if (override) return override;
   }
   return getPrReviewDefaultGhAccount();
-}
-
-export function normalizeAIProviderOverrides(overrides: AIProviderOverrides | undefined): AIProviderOverrides | undefined {
-  if (!overrides || typeof overrides !== 'object') {
-    return overrides;
-  }
-
-  const providers = overrides.providers;
-  if (!providers || typeof providers !== 'object') {
-    return overrides;
-  }
-
-  const normalizedProviders = normalizeCodexProviderConfig(providers);
-  const codexConfig = normalizedProviders['openai-codex'];
-
-  // Drop an empty codex config entry (artifact of UI clearing the override).
-  if (codexConfig && Object.keys(codexConfig).length === 0) {
-    const { 'openai-codex': _removed, ...restProviders } = normalizedProviders;
-    if (Object.keys(restProviders).length === 0) {
-      const { providers: _unusedProviders, ...restOverrides } = overrides;
-      // Spreading the input keeps own-but-undefined keys (e.g. an explicit
-      // `customClaudeCodePath: undefined` from a "clear override" save), which
-      // would prevent the empty-overrides check below from collapsing the
-      // object back to `undefined`.
-      if (restOverrides.customClaudeCodePath === undefined) {
-        delete restOverrides.customClaudeCodePath;
-      }
-      return Object.keys(restOverrides).length > 0 ? restOverrides : undefined;
-    }
-    return { ...overrides, providers: restProviders };
-  }
-
-  return {
-    ...overrides,
-    providers: normalizedProviders,
-  };
 }
 
 // Community popup shown state for current process launch (non-persisted)
@@ -1602,6 +1838,55 @@ export function isShowTrayIcon(): boolean {
 
 export function setShowTrayIcon(show: boolean): void {
   getAppStore().set('showTrayIcon', show);
+}
+
+export function isShowTrayStrip(): boolean {
+  return getAppStore().get('showTrayStrip', true);
+}
+
+export function setShowTrayStrip(show: boolean): void {
+  getAppStore().set('showTrayStrip', show);
+}
+
+/**
+ * How the fleet strip is drawn.
+ *
+ * `image` is the bitmap composited onto the tray item; `island` is a live
+ * window drawn in the menu bar row that expands into the session rows on hover.
+ * Both render the same `StripView`, and they are mutually exclusive -- island
+ * mode removes the tray item rather than sitting beside it.
+ *
+ * The default is the island on macOS and `image` everywhere else, where there
+ * is no menu bar row to draw into. Read as an unset-vs-set check rather than a
+ * defaulted `get`, because the platform decides the default and an existing
+ * install that never chose a style should move with it.
+ */
+export function getTrayStripStyle(): TrayStripStyle {
+  const stored = getAppStore().get('trayStripStyle');
+  if (stored === 'island' || stored === 'image') return stored;
+  return process.platform === 'darwin' ? 'island' : 'image';
+}
+
+export function setTrayStripStyle(style: TrayStripStyle): void {
+  getAppStore().set('trayStripStyle', style);
+}
+
+/**
+ * The display the user dragged the island onto, if any.
+ *
+ * Null rather than a default display because "no preference" and "the primary
+ * display" are different states: the first follows the primary as the user
+ * rearranges their monitors, the second would pin the island to whatever
+ * happened to be primary the day it was saved.
+ */
+export function getIslandDisplay(): IslandDisplayPreference | null {
+  const stored = getAppStore().get('islandDisplay');
+  if (!stored || typeof stored.id !== 'number') return null;
+  return { id: stored.id, label: typeof stored.label === 'string' ? stored.label : '' };
+}
+
+export function setIslandDisplay(preference: IslandDisplayPreference): void {
+  getAppStore().set('islandDisplay', preference);
 }
 
 // Completion Sound Settings
@@ -1749,6 +2034,41 @@ export function getDefaultAIModel(): string | undefined {
 
 export function setDefaultAIModel(model: string): void {
   getAppStore().set('defaultAIModel', model);
+}
+
+/**
+ * Keep a bounded number of workspaces' catalogs. Each entry is a full
+ * provider.list result, so an unbounded map would grow with every project the
+ * user ever discovers in; the least recently refreshed is evicted.
+ */
+const MAX_OPENCODE_MODEL_CATALOG_WORKSPACES = 20;
+
+export function getOpenCodeModelCatalogCache(
+  workspacePath: string
+): OpenCodeModelCatalogCache | null {
+  const byWorkspace = getAppStore().get('openCodeModelCatalogCaches') ?? {};
+  const stored = byWorkspace[workspacePath];
+  if (stored) return stored;
+
+  // Installs that discovered before per-workspace storage have one global slot.
+  // Honor it for the workspace it was actually recorded against (#1382).
+  const legacy = getAppStore().get('openCodeModelCatalogCache');
+  return legacy?.workspacePath === workspacePath ? legacy : null;
+}
+
+export function setOpenCodeModelCatalogCache(cache: OpenCodeModelCatalogCache): void {
+  const byWorkspace = { ...(getAppStore().get('openCodeModelCatalogCaches') ?? {}) };
+  byWorkspace[cache.workspacePath] = cache;
+
+  const entries = Object.entries(byWorkspace);
+  if (entries.length > MAX_OPENCODE_MODEL_CATALOG_WORKSPACES) {
+    entries.sort(([, a], [, b]) => b.refreshedAt - a.refreshedAt);
+    for (const [staleWorkspacePath] of entries.slice(MAX_OPENCODE_MODEL_CATALOG_WORKSPACES)) {
+      delete byWorkspace[staleWorkspacePath];
+    }
+  }
+
+  getAppStore().set('openCodeModelCatalogCaches', byWorkspace);
 }
 
 // Default Effort Level Settings (Opus 4.6 adaptive reasoning)
@@ -1947,6 +2267,14 @@ export function setExtensionEnabled(extensionId: string, enabled: boolean): void
     settings[extensionId].enabled = enabled;
   }
   setExtensionSettings(settings);
+}
+
+export function getClaudePluginDefaultEnabledMigrationVersion(): number {
+  return getAppStore().get('claudePluginDefaultEnabledMigrationVersion', 0);
+}
+
+export function setClaudePluginDefaultEnabledMigrationVersion(version: number): void {
+  getAppStore().set('claudePluginDefaultEnabledMigrationVersion', version);
 }
 
 export function getClaudePluginEnabled(extensionId: string): boolean | undefined {
@@ -2839,7 +3167,7 @@ export function runMigrations(currentVersion: string): void {
   // rather than having it silently reappear. Flag-guarded so it runs once.
   if (!getAppStore().get('gutterButtonsMigratedToGlobal')) {
     try {
-      const workspaces = getWorkspaceStore().store;
+      const workspaces = readWorkspaceStore();
       const union = new Set<string>(getAppStore().get('hiddenGutterItems') ?? []);
       for (const state of Object.values(workspaces ?? {})) {
         for (const id of state?.hiddenGutterButtons ?? []) {

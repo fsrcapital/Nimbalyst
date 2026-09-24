@@ -1,6 +1,8 @@
+import { SessionProviderIcon } from './SessionProviderIcon';
 import React, { useState, useCallback, useEffect, useRef, memo, useMemo } from 'react';
 import { useAtomValue, useSetAtom } from 'jotai';
-import { MaterialSymbol, ProviderIcon, copyToClipboard } from '@nimbalyst/runtime';
+import { MaterialSymbol } from '@nimbalyst/runtime/ui/icons/MaterialSymbol';
+import { copyToClipboard } from '@nimbalyst/runtime/utils/clipboard';
 import {
   sessionProcessingAtom,
   sessionUnreadAtom,
@@ -11,6 +13,7 @@ import {
   groupSessionStatusAtom,
   reparentSessionAtom,
   refreshSessionListAtom,
+  markSessionsReadAtom,
   sessionShareAtom,
   removeSessionShareAtom,
   shareKeysAtom,
@@ -198,6 +201,7 @@ export const WorkstreamGroup: React.FC<WorkstreamGroupProps> = ({
   const [isValidDropTarget, setIsValidDropTarget] = useState(false);
   const reparentSession = useSetAtom(reparentSessionAtom);
   const refreshSessionList = useSetAtom(refreshSessionListAtom);
+  const markSessionsRead = useSetAtom(markSessionsReadAtom);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     if ((type !== 'workstream' && type !== 'worktree') || !projectPath) return;
@@ -472,6 +476,14 @@ export const WorkstreamGroup: React.FC<WorkstreamGroupProps> = ({
       onSessionDelete(id);
     }
   }, [type, id, onSessionDelete]);
+
+  const handleWorkstreamMarkAllRead = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowContextMenu(false);
+    if (type !== 'workstream') return;
+    // The workstream row itself is a session too, so clear it alongside its children.
+    markSessionsRead([id, ...sessions.map((s) => s.id)]);
+  }, [type, id, sessions, markSessionsRead]);
 
   const handleWorkstreamCopySessionId = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -897,6 +909,15 @@ export const WorkstreamGroup: React.FC<WorkstreamGroupProps> = ({
               {isPinned ? 'Unpin' : 'Pin'}
             </button>
           )}
+          {type === 'workstream' && (
+            <button
+              className="workstream-group-context-menu-item flex items-center gap-2 w-full py-2 px-3 bg-transparent border-none cursor-pointer text-[0.8125rem] text-[var(--nim-text)] text-left rounded transition-colors duration-150 hover:bg-[var(--nim-bg-hover)]"
+              onClick={handleWorkstreamMarkAllRead}
+            >
+              <MaterialSymbol icon="done_all" size={14} />
+              Mark All Read
+            </button>
+          )}
           {type === 'workstream' && onSessionBranch && (
             <button
               className="workstream-group-context-menu-item flex items-center gap-2 w-full py-2 px-3 bg-transparent border-none cursor-pointer text-[0.8125rem] text-[var(--nim-text)] text-left rounded transition-colors duration-150 hover:bg-[var(--nim-bg-hover)]"
@@ -1203,11 +1224,7 @@ const WorkstreamSessionItem: React.FC<WorkstreamSessionItemProps> = ({
       aria-label={`Session: ${displayTitle}`}
       aria-current={isActive ? 'page' : undefined}
     >
-      <div className={`workstream-session-item-icon mt-0.5 shrink-0 flex items-center justify-center ${
-        isActive ? 'text-[var(--nim-primary)]' : 'text-[var(--nim-text-muted)]'
-      }`}>
-        <ProviderIcon provider={session.provider || 'claude'} size={14} />
-      </div>
+      <SessionProviderIcon sessionId={session.id} provider={session.provider} isActive={isActive} />
       {session.isPinned && (
         <MaterialSymbol icon="push_pin" size={10} className={`workstream-session-item-pin-icon shrink-0 -ml-1 opacity-70 ${
           isActive ? 'text-[var(--nim-primary)]' : 'text-[var(--nim-text-faint)]'

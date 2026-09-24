@@ -3,6 +3,7 @@ import { useSetAtom, useAtomValue, useAtom } from 'jotai';
 import type { ConfigTheme } from '@nimbalyst/runtime';
 import { asTeamJwt } from '@nimbalyst/runtime/auth/jwtScopes';
 import { useTabsActions, useTabNavigationShortcuts, type TabData } from '../../contexts/TabsContext';
+import { useRepresentedFileSync } from '../../hooks/useRepresentedFileSync';
 import { store, editorDirtyAtom, makeEditorKey } from '@nimbalyst/runtime/store';
 import { fileDeletedAtomFamily } from '../../store/atoms/fileWatch';
 import { pushNavigationEntryAtom, isRestoringNavigationAtom, historyDialogFileAtom } from '../../store';
@@ -54,6 +55,7 @@ export interface EditorModeRef {
   toggleAIChatCollapsed: () => void;
   toggleEditorMaximized: () => void;
   createNewChatSession: () => Promise<void>;
+  createNewFile: (initialType?: NewFileType) => void;
   tabs: {
     addTab: (filePath: string, content?: string) => string | undefined;
     removeTab: (tabId: string) => void;
@@ -188,6 +190,7 @@ const EditorMode = forwardRef<EditorModeRef, EditorModeProps>(function EditorMod
   // Get tab actions from context (doesn't subscribe to state - no re-renders)
   const tabsActions = useTabsActions();
   useTabNavigationShortcuts(isActive);
+  useRepresentedFileSync(isActive);
 
   // Refs for imperative DOM updates - NO re-renders for tab visibility
   const tabsContainerRef = useRef<HTMLDivElement>(null);
@@ -405,7 +408,8 @@ const EditorMode = forwardRef<EditorModeRef, EditorModeProps>(function EditorMod
   const currentFileName = currentFileInfo.fileName;
 
   // Expose current document path and workspace path to window for image paste/rendering
-  // __workspacePath is used by MockupPlatformServiceImpl and DataModelPlatformServiceImpl
+  // __workspacePath is read by EmbedFrame, the document-link plugin and the
+  // extension editors, none of which take it as a prop
   useEffect(() => {
     (window as any).__currentDocumentPath = currentFilePath;
     (window as any).workspacePath = workspacePath;
@@ -1022,6 +1026,16 @@ const EditorMode = forwardRef<EditorModeRef, EditorModeProps>(function EditorMod
         setIsAIChatCollapsed(false);
       }
       await chatSidebarRef.current?.createNewSession();
+    },
+    // Same path the Cmd+N accelerator takes, so the title bar's left control
+    // and the keyboard land the file in the same place: the selected folder if
+    // the tree has one, else the workspace root.
+    createNewFile: (initialType: NewFileType = 'markdown') => {
+      if (selectedFolderPath) {
+        setNewFileDirectory(selectedFolderPath);
+      }
+      setNewFileInitialType(initialType);
+      setIsNewFileDialogOpen(true);
     },
     tabs: {
       addTab: (filePath: string, content?: string) => {

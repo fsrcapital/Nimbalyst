@@ -30,6 +30,7 @@ import { feedbackRecipientDirectoryAtom } from '../../../../../store/atoms/feedb
 import {
   clearFeedbackRequestComposeDraft,
   feedbackRequestComposeDraftAtom,
+  feedbackRequestComposeSentAtom,
 } from '../../../../../store/atoms/feedbackRequestComposeDraft';
 import {
   InteractiveWidgetBody,
@@ -44,6 +45,7 @@ import {
   addRecipient,
   confirmPublish,
   describeComposeDefaults,
+  destinationSubjects,
   FEEDBACK_COMPOSE_BLOCKED_MESSAGES,
   feedbackComposeSendPayload,
   feedbackComposeSubmitPlan,
@@ -53,6 +55,7 @@ import {
   removeRecipient,
   removeSubject,
   setDeadline,
+  setDestination,
   setQuorumMode,
   setSettingsExpanded,
   setVisibility,
@@ -112,6 +115,7 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
   const host = useAtomValue(interactiveWidgetHostAtom(sessionId));
   const directory = useAtomValue(feedbackRecipientDirectoryAtom);
   const [draft, setDraft] = useAtom(feedbackRequestComposeDraftAtom(draftId));
+  const [sent, setSent] = useAtom(feedbackRequestComposeSentAtom(draftId));
 
   const parsedArgs = useMemo(
     () => (toolCall && draftId ? parseFeedbackComposeArgs(toolCall.arguments, draftId) : null),
@@ -137,9 +141,9 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
 
   const [isSending, setIsSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const [hasSent, setHasSent] = useState(false);
-  const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [publishPromptForced, setPublishPromptForced] = useState(false);
+  const hasSent = sent !== null;
+  const shareUrl = sent?.shareUrl ?? null;
   const [now] = useState(() => Date.now());
 
   const update = useCallback(
@@ -152,7 +156,9 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
 
   const send = useCallback(
     async (refsToPublish: ResourceRef[]) => {
-      if (!draft || !host?.feedbackRequestSend) return;
+      // `hasSent` rather than `isSending`: the latter only guards a second click
+      // inside one mount, and the duplicate requests came from a remount.
+      if (!draft || hasSent || !host?.feedbackRequestSend) return;
       setIsSending(true);
       setSendError(null);
       try {
@@ -160,9 +166,15 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
           feedbackComposeSendPayload(draft, refsToPublish),
         );
         if (result.success) {
-          setHasSent(true);
-          setShareUrl(result.shareUrl ?? null);
-          clearFeedbackRequestComposeDraft(draftId);
+          // The draft deliberately stays. Removing it empties the atom, which
+          // the seed effect above reads as "never composed" and refills from
+          // the agent's original arguments.
+          setSent({
+            sentAt: Date.now(),
+            ...(result.requestId ? { requestId: result.requestId } : {}),
+            ...(result.shareUrl ? { shareUrl: result.shareUrl } : {}),
+            ...(result.warning ? { warning: result.warning } : {}),
+          });
         } else {
           setSendError(result.error ?? 'The request could not be sent.');
         }
@@ -173,12 +185,24 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
         setIsSending(false);
       }
     },
-    [draft, host, draftId],
+    [draft, hasSent, host, setSent],
   );
 
+  const handleChangeDestination = useCallback(async () => {
+    if (!host?.pickFeedbackDestination) return;
+    try {
+      const picked = await host.pickFeedbackDestination({
+        folderId: draft?.destination?.folderId ?? null,
+        subjectCount: draft ? destinationSubjects(draft).length : 0,
+      });
+      // Dismissing the picker is not a choice; leave the draft as it was.
+      if (picked) update((current) => setDestination(current, picked));
+    } catch (error) {
+      console.error('[FeedbackRequestComposeWidget] Failed to pick a destination:', error);
+    }
+  }, [host, draft, update]);
+
   const handleCancel = useCallback(async () => {
-    setHasSent(false);
-    setShareUrl(null);
     try {
       await host?.feedbackRequestCancel?.(draftId);
     } catch (error) {
@@ -192,7 +216,7 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
   if (parsedResult && parsedResult.status !== 'draftReady') {
     return (
       <InteractiveWidgetCard
-        rootClassName="feedback-request-compose-widget"
+        rootClassName="feedback-request-compose-widget @container/feedback-compose"
         testId="feedback-request-compose-widget"
         state={parsedResult.status}
         tone="active"
@@ -228,7 +252,7 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
   if (hasSent) {
     return (
       <InteractiveWidgetCard
-        rootClassName="feedback-request-compose-widget"
+        rootClassName="feedback-request-compose-widget @container/feedback-compose"
         testId="feedback-request-compose-widget"
         state="sent"
         tone="resolved"
@@ -242,9 +266,7 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
           <div className="text-xs text-nim-muted leading-relaxed select-text">
             {draft.asks.map((ask) => ask.description || ask.label).join(' · ')}
           </div>
-          {/* The link is the delivery. Someone without the desktop app is
-              notified by nothing else, so the copy action sits on the
-              confirmation itself rather than behind a menu. */}
+          {sent.warning && <div role="status" className="text-xs text-nim-muted">{sent.warning}</div>}
           {shareUrl && (
             <div
               className="feedback-compose-share flex flex-wrap items-center gap-2"
@@ -263,7 +285,7 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
             </div>
           )}
           <div className="text-[0.6875rem] text-nim-faint">
-            This session is idle. It resumes by itself when replies arrive.
+            This session resumes when the questions reach quorum or are settled.
           </div>
         </InteractiveWidgetBody>
       </InteractiveWidgetCard>
@@ -306,8 +328,8 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
           : pendingPublish.length > 0
             ? 'Sending publishes the unshared subjects to your team.'
             : draft.subjects.length > 0
-              ? `Nothing gets published — ${joinNames(recipientNames)} can already see this.`
-              : 'Your session ends this turn and wakes when replies arrive.';
+              ? 'Sending saves the questions in the shared document and notifies the selected teammates.'
+              : 'Sending creates a shared decision document. Your session continues when enough answers arrive or a person settles it.';
 
   const showDelivery = tier === 'full' || draft.settingsExpanded;
 
@@ -331,6 +353,11 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
       />
 
       <InteractiveWidgetBody>
+        <div className="feedback-compose-document-host text-xs text-nim-muted mb-3">
+          {draft.hostDocumentId
+            ? `Document: ${draft.subjects.find((subject) => subject.ref.sourceId === draft.hostDocumentId)?.label ?? draft.hostDocumentId}`
+            : 'Document: new shared decision document'}
+        </div>
         {/* Subject — Tier 2 only; a one-person quick ask does not need a
             subject row, and showing one implies ceremony the ask lacks. */}
         {tier === 'full' && draft.subjects.length > 0 && (
@@ -420,7 +447,11 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
               question={ask.description || ask.label}
               selectableQuestion
             >
-              <FeedbackComposeAskPreview ask={ask} />
+              <FeedbackComposeAskPreview
+                ask={ask}
+                renderArtifact={host?.renderFeedbackArtifactPreview}
+                renderArtifactPopover={host?.renderFeedbackArtifactPopover}
+              />
             </WidgetBlock>
           );
         })}
@@ -473,6 +504,11 @@ export const FeedbackRequestComposeWidget: React.FC<CustomToolWidgetProps> = ({
             forceExpanded={publishPromptForced}
             onConfirmAndSend={handleConfirmPublishAndSend}
             disabled={!canSend}
+            destinationSubjectCount={destinationSubjects(draft).length}
+            destination={draft.destination}
+            onChangeDestination={
+              host?.pickFeedbackDestination ? handleChangeDestination : undefined
+            }
           />
         )}
 

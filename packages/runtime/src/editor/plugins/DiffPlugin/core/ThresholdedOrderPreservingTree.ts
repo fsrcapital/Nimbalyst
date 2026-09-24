@@ -8,6 +8,112 @@ export type DiffOp =
     | { op: 'delete'; aPath: Path; a: CanonicalTreeNode }
     | { op: 'replace'; aPath: Path; bPath: Path; a: CanonicalTreeNode; b: CanonicalTreeNode };
 
+/**
+ * Cap on the number of (source child, target child) cells this diff may
+ * evaluate. Every `pairCost` / `alignChildren` call allocates an m*n cost
+ * matrix and memoizes an entry per cell, so the work and the memory are both
+ * quadratic in sibling count. Without a cap, a document with a few thousand
+ * blocks on each side crosses V8's ~16.7M `Map` entry limit and the whole
+ * thing dies with "Map maximum size exceeded" -- after ~31s of a frozen
+ * renderer main thread, with no diff to show for it (#4821).
+ *
+ * 2M cells is ~8x below the V8 cap. Measured on a paragraph-per-block corpus:
+ * 160k cells ~0.5s, 640k ~2.4s, 1.96M ~6.4s -- so this bounds the worst case
+ * at a few seconds rather than half a minute, and it is a last-resort net, not
+ * a UX target. Callers that can bail more gracefully (see the root-node guard
+ * in TabEditor) should do so well before reaching this ceiling.
+ */
+export const DEFAULT_MAX_PAIR_EVALUATIONS = 2_000_000;
+
+/**
+ * Thrown when a diff would exceed {@link DiffOpts.maxPairEvaluations}. Callers
+ * are expected to catch this and fall back to a non-structural presentation
+ * rather than let it surface as an opaque runtime error.
+ */
+export class DiffBudgetExceededError extends Error {
+    readonly sourceChildCount: number;
+    readonly targetChildCount: number;
+    readonly budget: number;
+
+    constructor(sourceChildCount: number, targetChildCount: number, budget: number) {
+        super(
+            `Tree diff exceeded its pair budget: aligning ${sourceChildCount} source ` +
+            `against ${targetChildCount} target children needs ` +
+            `${sourceChildCount * targetChildCount} cells, budget is ${budget}`,
+        );
+        this.name = 'DiffBudgetExceededError';
+        this.sourceChildCount = sourceChildCount;
+        this.targetChildCount = targetChildCount;
+        this.budget = budget;
+    }
+}
+
+/**
+ * Charges m*n before each alignment matrix is allocated, so an over-budget
+ * pair throws in O(1) instead of after the allocation it cannot afford.
+ */
+class PairBudget {
+    private used = 0;
+
+    constructor(private readonly limit: number) {}
+
+    charge(m: number, n: number): void {
+        const cells = m * n;
+        if (cells > this.limit - this.used) {
+            throw new DiffBudgetExceededError(m, n, this.limit);
+        }
+        this.used += cells;
+    }
+}
+
+type PairContext = {
+    memo: Map<PairKey, number>;
+    budget: PairBudget;
+    signatures: WeakMap<CanonicalTreeNode, number>;
+    signatureIds: Map<string, number>;
+};
+
+/**
+ * Everything `pairCost` reads from a subtree -- type, text, attrs, children --
+ * interned to an id, so two nodes with the same id always cost 0 against each
+ * other. The key embeds child ids, never child keys: nesting the child strings
+ * re-escapes them at every level, and on ten levels of nested lists that grew
+ * exponentially (134ms -> 8.7s).
+ */
+function signature(n: CanonicalTreeNode, ctx: PairContext): number {
+    const cached = ctx.signatures.get(n);
+    if (cached !== undefined) return cached;
+    const childIds = kids(n).map((c) => signature(c, ctx));
+    const key = JSON.stringify([n.type, n.text ?? '', n.attrs ?? null, childIds]);
+    let id = ctx.signatureIds.get(key);
+    if (id === undefined) {
+        id = ctx.signatureIds.size;
+        ctx.signatureIds.set(key, id);
+    }
+    ctx.signatures.set(n, id);
+    return id;
+}
+
+function sameSubtree(a: CanonicalTreeNode, b: CanonicalTreeNode, ctx: PairContext): boolean {
+    return a === b || signature(a, ctx) === signature(b, ctx);
+}
+
+/**
+ * Leading and trailing children that are identical on both sides. An agent edit
+ * usually touches a few blocks of a long document, and aligning the unchanged
+ * ones all-pairs is what froze the renderer for ~6s on a ~200-block plan: every
+ * list was costed against every other list, recursively. Identical runs at the
+ * edges are matched in place, so only the changed middle pays for the DP.
+ */
+function identicalEdges(A: CanonicalTreeNode[], B: CanonicalTreeNode[], ctx: PairContext): { pre: number; suf: number } {
+    const max = Math.min(A.length, B.length);
+    let pre = 0;
+    while (pre < max && sameSubtree(A[pre], B[pre], ctx)) pre++;
+    let suf = 0;
+    while (suf < max - pre && sameSubtree(A[A.length - 1 - suf], B[B.length - 1 - suf], ctx)) suf++;
+    return { pre, suf };
+}
+
 export type DiffOpts = {
     // node-pairing
     allowTypePair?: (aType: string, bType: string) => boolean;
@@ -25,6 +131,9 @@ export type DiffOpts = {
 
     // text similarity
     isTextual?: (n: CanonicalTreeNode) => boolean;
+
+    // safety
+    maxPairEvaluations: number;         // see DEFAULT_MAX_PAIR_EVALUATIONS
 };
 
 const DFLT: DiffOpts = {
@@ -37,6 +146,7 @@ const DFLT: DiffOpts = {
     wAttr: 0.15,
     wStruct: 0.35,
     isTextual: (n) => n.type === 'text' || n.type === 'paragraph',
+    maxPairEvaluations: DEFAULT_MAX_PAIR_EVALUATIONS,
 };
 
 const kids = (n?: CanonicalTreeNode) => n?.children ?? [];
@@ -173,7 +283,8 @@ function contextualSimilarity(
 type PairKey = string;
 const keyFor = (a: CanonicalTreeNode, b: CanonicalTreeNode): PairKey => `${a.id}|${b.id}`;
 
-function pairCost(a: CanonicalTreeNode, b: CanonicalTreeNode, opts: DiffOpts, pairMemo: Map<PairKey, number>): number {
+function pairCost(a: CanonicalTreeNode, b: CanonicalTreeNode, opts: DiffOpts, ctx: PairContext): number {
+    const pairMemo = ctx.memo;
     const k = keyFor(a, b);
     if (pairMemo.has(k)) return pairMemo.get(k)!;
 
@@ -183,22 +294,32 @@ function pairCost(a: CanonicalTreeNode, b: CanonicalTreeNode, opts: DiffOpts, pa
         pairMemo.set(k, cost); return cost;
     }
 
-    const textSimValue = textSim(a.text, b.text);
-    const txt = (opts.isTextual!(a) && opts.isTextual!(b)) ? (1 - textSimValue) : 0;
+    if (sameSubtree(a, b, ctx)) {
+        pairMemo.set(k, 0); return 0;
+    }
+
+    // Word-level LCS is the most expensive part of a cell; only pay it when the
+    // text actually contributes to the cost.
+    const txt = (opts.isTextual!(a) && opts.isTextual!(b)) ? (1 - textSim(a.text, b.text)) : 0;
     const attr = attrDist(a.attrs, b.attrs);
     const typePen = a.type === b.type ? 0 : opts.typePenalty;
 
-    // align children with *order-preserving* DP allowing matches only if pairCost ≤ threshold
+    // align children with *order-preserving* DP allowing matches only if pairCost ≤ threshold.
+    // Identical leading/trailing children match at zero cost, so the DP only
+    // covers the changed middle (offset `pre` into both sides).
     const A = kids(a), B = kids(b);
-    const m = A.length, n = B.length;
+    const { pre, suf } = identicalEdges(A, B, ctx);
+    const m = A.length - pre - suf, n = B.length - pre - suf;
+    ctx.budget.charge(m, n);
     const dp = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
-    for (let i = 1; i <= m; i++) dp[i][0] = dp[i - 1][0] + delCost(A[i - 1], opts);
-    for (let j = 1; j <= n; j++) dp[0][j] = dp[0][j - 1] + delCost(B[j - 1], opts);
+    for (let i = 1; i <= m; i++) dp[i][0] = dp[i - 1][0] + delCost(A[pre + i - 1], opts);
+    for (let j = 1; j <= n; j++) dp[0][j] = dp[0][j - 1] + delCost(B[pre + j - 1], opts);
 
     // Precompute child pair costs (and refuse matches above threshold)
     const PC: number[][] = Array.from({ length: m }, () => new Array<number>(n).fill(Infinity));
-    for (let i = 0; i < m; i++) for (let j = 0; j < n; j++) {
-        let c = pairCost(A[i], B[j], opts, pairMemo);
+    for (let mi = 0; mi < m; mi++) for (let mj = 0; mj < n; mj++) {
+        const i = pre + mi, j = pre + mj;
+        let c = pairCost(A[i], B[j], opts, ctx);
 
         // EMPTY NODE CONTEXTUAL MATCHING (same as in alignChildren)
         if (isEmptyNode(A[i]) && isEmptyNode(B[j])) {
@@ -215,13 +336,13 @@ function pairCost(a: CanonicalTreeNode, b: CanonicalTreeNode, opts: DiffOpts, pa
         // normalize to [0,1]ish by dividing by (del+ins) so threshold is meaningful across sizes
         const base = delCost(A[i], opts) + delCost(B[j], opts) || 1;
         const norm = c / base; // ~0 == identical, ~1 == replace
-        PC[i][j] = norm <= opts.pairAlignThreshold ? c : Infinity;
+        PC[mi][mj] = norm <= opts.pairAlignThreshold ? c : Infinity;
     }
 
     for (let i = 1; i <= m; i++) {
         for (let j = 1; j <= n; j++) {
-            const del = dp[i - 1][j] + delCost(A[i - 1], opts);
-            const ins = dp[i][j - 1] + delCost(B[j - 1], opts);
+            const del = dp[i - 1][j] + delCost(A[pre + i - 1], opts);
+            const ins = dp[i][j - 1] + delCost(B[pre + j - 1], opts);
             const match = PC[i - 1][j - 1] < Infinity ? dp[i - 1][j - 1] + PC[i - 1][j - 1] : Infinity;
             dp[i][j] = Math.min(del, ins, match);
         }
@@ -236,17 +357,24 @@ function pairCost(a: CanonicalTreeNode, b: CanonicalTreeNode, opts: DiffOpts, pa
 // Recover the optimal child alignment (order-preserving; no "moves")
 type Step = { kind: 'match'; i: number; j: number } | { kind: 'del'; i: number } | { kind: 'ins'; j: number };
 
-function alignChildren(a: CanonicalTreeNode, b: CanonicalTreeNode, opts: DiffOpts, pairMemo: Map<PairKey, number>): Step[] {
+function alignChildren(a: CanonicalTreeNode, b: CanonicalTreeNode, opts: DiffOpts, ctx: PairContext): Step[] {
+    // No budget charge here: `walk` always resolves `pairCost(a, b)` before it
+    // calls us, and that call already charged this pair's m*n cells. Charging
+    // again would halve the effective budget for no extra safety.
+    // Same trimming as `pairCost`: identical edges match in place and only the
+    // changed middle (offset `pre`) goes through the DP.
     const A = kids(a), B = kids(b);
-    const m = A.length, n = B.length;
+    const { pre, suf } = identicalEdges(A, B, ctx);
+    const m = A.length - pre - suf, n = B.length - pre - suf;
     const dp = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
-    for (let i = 1; i <= m; i++) dp[i][0] = dp[i - 1][0] + delCost(A[i - 1], opts);
-    for (let j = 1; j <= n; j++) dp[0][j] = dp[0][j - 1] + delCost(B[j - 1], opts);
+    for (let i = 1; i <= m; i++) dp[i][0] = dp[i - 1][0] + delCost(A[pre + i - 1], opts);
+    for (let j = 1; j <= n; j++) dp[0][j] = dp[0][j - 1] + delCost(B[pre + j - 1], opts);
 
     const PC: number[][] = Array.from({ length: m }, () => new Array<number>(n).fill(Infinity));
     const isExactMatch: boolean[][] = Array.from({ length: m }, () => new Array<boolean>(n).fill(false));
-    for (let i = 0; i < m; i++) for (let j = 0; j < n; j++) {
-        let c = pairCost(A[i], B[j], opts, pairMemo);
+    for (let mi = 0; mi < m; mi++) for (let mj = 0; mj < n; mj++) {
+        const i = pre + mi, j = pre + mj;
+        let c = pairCost(A[i], B[j], opts, ctx);
         const base = delCost(A[i], opts) + delCost(B[j], opts) || 1;
 
         // EMPTY NODE CONTEXTUAL MATCHING
@@ -281,7 +409,7 @@ function alignChildren(a: CanonicalTreeNode, b: CanonicalTreeNode, opts: DiffOpt
 
         const norm = c / base;
         if (norm <= opts.pairAlignThreshold) {
-            PC[i][j] = c; // only allow "match" when similar enough
+            PC[mi][mj] = c; // only allow "match" when similar enough
         } else {
             // Debug: log blocked matches for empty nodes
             if (process?.env?.DIFF_DEBUG === '1' && isEmptyNode(A[i]) && isEmptyNode(B[j])) {
@@ -294,16 +422,16 @@ function alignChildren(a: CanonicalTreeNode, b: CanonicalTreeNode, opts: DiffOpt
         // EXCEPT for empty paragraphs which need context to disambiguate
         const isEmpty = isEmptyNode(A[i]);
         if (opts.isTextual!(A[i]) && opts.isTextual!(B[j]) && A[i].text === B[j].text && !isEmpty) {
-            isExactMatch[i][j] = true;
-            PC[i][j] = 0;  // Zero cost ensures exact matches are always chosen
+            isExactMatch[mi][mj] = true;
+            PC[mi][mj] = 0;  // Zero cost ensures exact matches are always chosen
         } else if (process?.env?.DIFF_DEBUG === '1' && isEmpty && A[i].text === B[j].text) {
             console.log(`[TOPT] NOT forcing exact match for empty node [${i}]->[${j}] (preserving contextual cost)`);
         }
     }
 
     for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++) {
-        const del = dp[i - 1][j] + delCost(A[i - 1], opts);
-        const ins = dp[i][j - 1] + delCost(B[j - 1], opts);
+        const del = dp[i - 1][j] + delCost(A[pre + i - 1], opts);
+        const ins = dp[i][j - 1] + delCost(B[pre + j - 1], opts);
         const match = PC[i - 1][j - 1] < Infinity ? dp[i - 1][j - 1] + PC[i - 1][j - 1] : Infinity;
 
         // CRITICAL: Force exact text matches to always be chosen
@@ -316,21 +444,30 @@ function alignChildren(a: CanonicalTreeNode, b: CanonicalTreeNode, opts: DiffOpt
         }
     }
 
+    // Backtrack in reverse: trailing identical run, the DP middle, then the
+    // leading identical run. Step indices are always into the full child lists.
     const steps: Step[] = [];
+    for (let s = 0; s < suf; s++) steps.push({ kind: 'match', i: A.length - 1 - s, j: B.length - 1 - s });
     let i = m, j = n;
     while (i > 0 || j > 0) {
         const canMatch = i > 0 && j > 0 && PC[i - 1][j - 1] < Infinity && dp[i][j] === dp[i - 1][j - 1] + PC[i - 1][j - 1];
-        if (canMatch) { steps.push({ kind: 'match', i: i - 1, j: j - 1 }); i--; j--; continue; }
-        if (i > 0 && dp[i][j] === dp[i - 1][j] + delCost(A[i - 1], opts)) { steps.push({ kind: 'del', i: i - 1 }); i--; continue; }
-        steps.push({ kind: 'ins', j: j - 1 }); j--;
+        if (canMatch) { steps.push({ kind: 'match', i: pre + i - 1, j: pre + j - 1 }); i--; j--; continue; }
+        if (i > 0 && dp[i][j] === dp[i - 1][j] + delCost(A[pre + i - 1], opts)) { steps.push({ kind: 'del', i: pre + i - 1 }); i--; continue; }
+        steps.push({ kind: 'ins', j: pre + j - 1 }); j--;
     }
+    for (let s = pre - 1; s >= 0; s--) steps.push({ kind: 'match', i: s, j: s });
     steps.reverse();
     return steps;
 }
 
 export function diffTrees(a: CanonicalTreeNode, b: CanonicalTreeNode, optsPartial: Partial<DiffOpts> = {}): DiffOp[] {
     const opts: DiffOpts = { ...DFLT, ...optsPartial };
-    const memo = new Map<PairKey, number>();
+    const ctx: PairContext = {
+        memo: new Map<PairKey, number>(),
+        budget: new PairBudget(opts.maxPairEvaluations),
+        signatures: new WeakMap(),
+        signatureIds: new Map(),
+    };
     const ops: DiffOp[] = [];
 
     function walk(aNode: CanonicalTreeNode | null, bNode: CanonicalTreeNode | null, aPath: Path, bPath: Path) {
@@ -338,7 +475,7 @@ export function diffTrees(a: CanonicalTreeNode, b: CanonicalTreeNode, optsPartia
         if (!aNode && bNode) { ops.push({ op: 'insert', bPath, b: bNode }); return; }
 
         const aN = aNode!, bN = bNode!;
-        const cost = pairCost(aN, bN, opts, memo);
+        const cost = pairCost(aN, bN, opts, ctx);
 
         // Decide "equal" vs "replace" for this node pair
         if (cost <= opts.equalThreshold) {
@@ -351,7 +488,7 @@ export function diffTrees(a: CanonicalTreeNode, b: CanonicalTreeNode, optsPartia
         }
 
         // Align children in order; reorders will surface as delete+insert
-        const steps = alignChildren(aN, bN, opts, memo);
+        const steps = alignChildren(aN, bN, opts, ctx);
         for (const s of steps) {
             if (s.kind === 'match') {
                 walk(kids(aN)[s.i], kids(bN)[s.j], [...aPath, s.i], [...bPath, s.j]);

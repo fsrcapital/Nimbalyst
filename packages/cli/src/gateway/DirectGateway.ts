@@ -3,14 +3,22 @@
  * directly. Safe to run while the app is live because WAL lets a second process
  * read committed snapshots; we never take a write lock in this gateway.
  *
- * Row -> record conversion goes through the vendored `dbRowToRecord` so a
+ * Row -> record conversion goes through tracker-core's `dbRowToRecord` so a
  * CLI-read row is shaped identically to an app-read one.
  */
 import type { Database as DB } from 'better-sqlite3';
 import * as fs from 'fs';
+import {
+  computeReadinessForItems,
+  createTrackerCoreContext,
+  dbRowToRecord,
+  isLocalKeyReference,
+  READINESS_FILTER_FIELD,
+  type Readiness,
+  type TrackerRecord,
+  type TrackerTypeModel,
+} from '@nimbalyst/tracker-core';
 import { openDatabase } from '../db/openDatabase.js';
-import { isLocalKeyReference } from '../vendor/localIssueKey.js';
-import { dbRowToRecord, type TrackerRecord } from '../vendor/trackerRecord.js';
 import {
   appendActivity,
   buildComment,
@@ -18,7 +26,7 @@ import {
   humanOnlyStatusMessage,
   isHumanOnlyStatus,
   newTrackerId,
-} from '../vendor/trackerWrite.js';
+} from './trackerWrite.js';
 import { resolveSqlitePath, resolveDefaultSqlitePath, resolveAppSettingsPath } from '../config/paths.js';
 import {
   connectionError,
@@ -26,6 +34,7 @@ import {
   schemaError,
   writeNotPermittedError,
 } from '../cli/exitCodes.js';
+import { getTrackerDisplayRef, issueKeyStatus } from '../cli/output.js';
 import { discoverEndpoint } from './endpoint.js';
 import {
   MIN_SUPPORTED_SCHEMA,
@@ -143,14 +152,17 @@ export class DirectGateway implements TrackerGateway {
   async listTrackers(filters: ListFilters): Promise<TrackerRecord[]> {
     if (filters.inbox) {
       // "Untriaged" is defined against each type's initial status and default
-      // priority, and the CLI deliberately does not load tracker schemas (see
-      // src/vendor/trackerReleases.ts). Answering from SQL alone would give a
-      // queue that disagrees with the one the app shows, which is worse than
-      // not answering.
+      // priority. `loadTypeDefs` only sees schemas the app has already
+      // materialized into the local database, so a workspace the app has never
+      // opened has none, and answering from SQL alone would give a queue that
+      // disagrees with the one the app shows -- worse than not answering.
       throw connectionError(
         '--inbox needs the running Nimbalyst app: the triage predicate reads each type\'s schema. ' +
           'Start Nimbalyst, or drop --inbox to list without it.',
       );
+    }
+    if (filters.where?.some((clause) => clause.field === READINESS_FILTER_FIELD)) {
+      return this.listTrackersWithReadiness(filters);
     }
     const where: string[] = ['workspace = @workspace', 'deleted_at IS NULL'];
     const params: Record<string, unknown> = { workspace: filters.workspace };
@@ -251,6 +263,56 @@ export class DirectGateway implements TrackerGateway {
 
     const rows = this.db.prepare(sql).all(params) as any[];
     return rows.map(dbRowToRecord);
+  }
+
+  private listTrackersWithReadiness(filters: ListFilters): TrackerRecord[] {
+    const dateCol = filters.dateField === 'created' ? 'created' : 'updated';
+    const rows = this.db.prepare(
+      `SELECT ti.*, td.model AS __readiness_type_model
+       FROM tracker_items AS ti
+       LEFT JOIN tracker_type_defs AS td
+         ON td.workspace = ti.workspace AND td.type = ti.type AND td.deleted_at IS NULL
+       WHERE ti.workspace = @workspace AND ti.deleted_at IS NULL
+       ORDER BY ti.${dateCol} DESC`,
+    ).all({ workspace: filters.workspace }) as Array<Record<string, unknown>>;
+
+    const typeModels = readReadinessTypeModels(rows);
+    const modeledTypes = new Set(typeModels.map((model) => model.type));
+    const missingTypes = [...new Set(
+      rows.map((row) => String(row.type ?? '')).filter((type) => type && !modeledTypes.has(type)),
+    )].sort();
+    if (missingTypes.length > 0) {
+      throw schemaError(
+        `Cannot compute readiness because these tracker types have no materialized schema: ` +
+          `${missingTypes.join(', ')}. Open this workspace in Nimbalyst once to materialize them.`,
+      );
+    }
+    const modelsByType = new Map(typeModels.map((model) => [model.type, model]));
+    const trackerContext = createTrackerCoreContext((type) => modelsByType.get(type));
+    const records = rows.map((row) => dbRowToRecord(row as any));
+    const readiness = computeReadinessForItems(trackerContext, records, {
+      getId: (record) => record.id,
+      getType: (record) => record.primaryType,
+      getStatus: (record) => {
+        const model = trackerContext.getTypeModel(record.primaryType);
+        const fieldName = model?.roles?.workflowStatus ?? 'status';
+        return String(record.fields[fieldName] ?? '');
+      },
+      getTitle: (record) => {
+        const model = trackerContext.getTypeModel(record.primaryType);
+        const fieldName = model?.roles?.title ?? 'title';
+        const title = record.fields[fieldName];
+        return typeof title === 'string' ? title : undefined;
+      },
+      getFieldValue: (record, fieldName) => record.fields[fieldName],
+      getReference: (record) => ({
+        ref: getTrackerDisplayRef(record),
+        refStatus: issueKeyStatus(record),
+      }),
+    });
+
+    return applyInMemoryListFilters(records, filters, readiness)
+      .slice(0, resolveLimit(filters.limit));
   }
 
   async getTracker(workspace: string, reference: string): Promise<TrackerRecord | null> {
@@ -501,11 +563,17 @@ export class DirectGateway implements TrackerGateway {
     const titleField = rf('title', 'title');
     const statusField = rf('workflowStatus', 'status');
     const priorityField = rf('priority', 'priority');
+    const model = this.loadTypeDefs(workspace).get(input.type);
+    const statusDefinition = model?.fields?.find((field: any) => field.name === statusField);
+    const defaultStatus =
+      typeof statusDefinition?.default === 'string' && statusDefinition.default
+        ? statusDefinition.default
+        : 'to-do';
     this.assertNotHumanOnlyStatus(statusField, input);
 
     const data: Record<string, any> = {
       [titleField]: input.title,
-      [statusField]: input.status || 'to-do',
+      [statusField]: input.status || defaultStatus,
       [priorityField]: input.priority || 'medium',
       created: createdDate,
       authorIdentity: identity,
@@ -521,6 +589,16 @@ export class DirectGateway implements TrackerGateway {
     if (input.fields) {
       for (const [k, v] of Object.entries(input.fields)) {
         if (v !== undefined) data[k] = v;
+      }
+    }
+    for (const field of model?.fields ?? []) {
+      if (
+        field.required
+        && field.type === 'string'
+        && field.displayInline === false
+        && data[field.name] === undefined
+      ) {
+        data[field.name] = id;
       }
     }
     appendActivity(data, identity, 'created');
@@ -817,6 +895,85 @@ function resolveLimit(limit: number | undefined): number {
   if (limit === undefined) return DEFAULT_LIMIT;
   if (limit < 0) return ALL_CAP; // --all maps to a large cap by the caller
   return Math.min(limit, MAX_LIMIT);
+}
+
+function readReadinessTypeModels(
+  rows: Array<Record<string, unknown>>,
+): TrackerTypeModel[] {
+  const models = new Map<string, TrackerTypeModel>();
+  for (const row of rows) {
+    const raw = row.__readiness_type_model;
+    if (typeof raw !== 'string') continue;
+    try {
+      const model = JSON.parse(raw) as TrackerTypeModel;
+      if (model?.type) models.set(model.type, model);
+    } catch {
+      /* malformed materialized schema: status resolution stays conservative */
+    }
+  }
+  return [...models.values()];
+}
+
+function applyInMemoryListFilters(
+  records: TrackerRecord[],
+  filters: ListFilters,
+  readiness: ReadonlyMap<string, Readiness>,
+): TrackerRecord[] {
+  const dateField = filters.dateField === 'created' ? 'createdAt' : 'updatedAt';
+  return records.filter((record) => {
+    if (!filters.includeArchived && record.archived) return false;
+    if (filters.type && record.primaryType !== filters.type) return false;
+    if (filters.typeTag && !record.typeTags.includes(filters.typeTag)) return false;
+
+    const status = String(record.fields.status ?? '');
+    if (filters.status) {
+      if (isMetaStatus(filters.status)) {
+        const terminal = TERMINAL_STATUSES.has(status.toLowerCase());
+        if (filters.status === 'closed' ? !terminal : terminal) return false;
+      } else if (status !== filters.status) {
+        return false;
+      }
+    }
+
+    if (filters.priority && record.fields.priority !== filters.priority) return false;
+    if (filters.owner && record.fields.owner !== filters.owner) return false;
+    if (filters.search) {
+      const needle = filters.search.toLowerCase();
+      const title = String(record.fields.title ?? '').toLowerCase();
+      const description = String(record.fields.description ?? '').toLowerCase();
+      if (!title.includes(needle) && !description.includes(needle)) return false;
+    }
+    if (filters.since && (record.system[dateField] ?? '') < filters.since) return false;
+    if (filters.until && (record.system[dateField] ?? '') > filters.until) return false;
+
+    return (filters.where ?? []).every((clause) => {
+      const value = clause.field === READINESS_FILTER_FIELD
+        ? readiness.get(record.id)?.state
+        : record.fields[clause.field];
+      return matchesWhereClause(value, clause.op, clause.value);
+    });
+  });
+}
+
+function matchesWhereClause(
+  actual: unknown,
+  op: '=' | '!=' | '~' | 'in',
+  expected: string,
+): boolean {
+  const value = actual == null
+    ? ''
+    : typeof actual === 'string' ? actual : JSON.stringify(actual);
+  switch (op) {
+    case '=':
+      return value === expected;
+    case '!=':
+      return value !== expected;
+    case '~':
+      return value.toLowerCase().includes(expected.toLowerCase());
+    case 'in':
+      return expected.split(',').map((entry) => entry.trim()).includes(value);
+  }
+  return false;
 }
 
 /** SQLite json paths can't contain a literal single quote; field names are

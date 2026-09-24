@@ -24,6 +24,8 @@ import { CodexRawParserDispatcher } from './parsers/CodexRawParserDispatcher';
 import { CodexACPRawParser } from './parsers/CodexACPRawParser';
 import { CopilotRawParser } from './parsers/CopilotRawParser';
 import { OpenCodeRawParser } from './parsers/OpenCodeRawParser';
+import { HeadlessAgentRawParser } from './parsers/HeadlessAgentRawParser';
+import { GeminiAntigravityRawParser } from './parsers/GeminiAntigravityRawParser';
 import { VoiceRawParser } from './parsers/VoiceRawParser';
 import type {
   IRawMessageParser,
@@ -269,6 +271,17 @@ export class TranscriptTransformer {
     // instead of in-memory maps (no batch state to carry over)
     const toolEventIds = new Map<string, number>();
     const subagentEventIds = new Map<string, number>();
+    // A late sidecar arrives after its Agent/Task spawn's batch. Restore the
+    // canonical subagent identities before the parser makes synchronous routing
+    // decisions; an empty map would send child tools to the top-level transcript.
+    if (afterId > 0) {
+      for (const event of await this.transcriptStore.getSessionEvents(sessionId, { eventTypes: ['subagent'] })) {
+        if (event.subagentId) {
+          subagentEventIds.set(event.subagentId, event.id);
+          toolEventIds.set(event.subagentId, event.id);
+        }
+      }
+    }
 
     const context: ParseContext = {
       sessionId,
@@ -480,6 +493,13 @@ export class TranscriptTransformer {
     if (provider === 'opencode') {
       return new OpenCodeRawParser();
     }
+    if (provider === 'grok-build' || provider === 'cursor-agent') {
+      return new HeadlessAgentRawParser(provider);
+    }
+    if (provider === 'antigravity-gemini-agent') {
+      return new GeminiAntigravityRawParser();
+    }
+
     if (provider === 'openai-realtime') {
       return new VoiceRawParser();
     }

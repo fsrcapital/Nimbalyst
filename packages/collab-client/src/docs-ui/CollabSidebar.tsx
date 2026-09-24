@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { SharedDocumentLink } from './SharedDocumentLink';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CollabDocumentTypeDescriptor } from '@nimbalyst/collab-client/core';
 import { useAtomValue } from 'jotai';
 import { store } from '@nimbalyst/runtime/store';
 import { MaterialSymbol } from '@nimbalyst/runtime/ui/icons/MaterialSymbol';
+import './collabSidebarTree.css';
 import { InputModal } from './primitives/InputModal';
 import { ScopeSummaryHeader } from './primitives/ScopeSummaryHeader';
 import { CollabCreateItemDialog } from './CollabCreateItemDialog';
@@ -26,6 +28,7 @@ import {
   type CollabTreeNode,
 } from '@nimbalyst/collab-client/docs';
 import { useFloatingMenu, FloatingPortal, virtualElement } from './primitives/useFloatingMenu';
+import { CollabSearchInput } from './primitives/CollabSearchInput';
 import { DocUnreadDot } from './DocUnreadDot';
 import { bucketItemCount, trackDocumentAction } from './analytics';
 import { useCollabDocsUI, type CollabTreeFilter } from './CollabDocsUIProvider';
@@ -34,6 +37,10 @@ import {
   getSharedDocumentRenameParts,
   resolveSharedDocumentTypePresentation,
 } from './documentPresentation';
+import {
+  COLLAB_DOCUMENT_DRAG_TYPE,
+  type CollabDocumentDragPayload,
+} from './documentDrag';
 
 // ---------------------------------------------------------------------------
 // TeamSync status indicator -- shown in the header subtitle slot
@@ -88,6 +95,24 @@ export interface CollabSidebarProps {
    * stays a pure expand/select there.
    */
   onSelectFolder?: (folderId: string | null) => void;
+  /**
+   * Publishes this tree's create menu to a host outside it (the desktop title
+   * bar's create control). The list is built here because the catalog filtering
+   * that decides which types are shareable at all lives here; a second copy in
+   * the host would drift from it.
+   */
+  registerCreateMenu?: (menu: CollabSidebarCreateMenu | null) => void;
+}
+
+export interface CollabSidebarCreateMenu {
+  items: Array<{ id: string; label: string; icon: string; onSelect: () => void }>;
+  /** Folder the new document lands in, or null for the space root. */
+  destination: string | null;
+  /** Default action: a shared Markdown doc. */
+  onPrimary: () => void;
+  /** Extension the default action produces, shown beside it. */
+  primaryTrailing?: string;
+  onNewFolder: () => void;
 }
 
 export const CollabSidebar: React.FC<CollabSidebarProps> = ({
@@ -98,6 +123,7 @@ export const CollabSidebar: React.FC<CollabSidebarProps> = ({
   scopePath,
   headerActions,
   onSelectFolder,
+  registerCreateMenu,
 }) => {
   const { scope, host, session, controller } = useCollabDocsUI();
   const documentTypesRevision = useSyncExternalStore(
@@ -649,6 +675,50 @@ export const CollabSidebar: React.FC<CollabSidebarProps> = ({
     setContextMenu(null);
   }, [getCreationBaseFolderId, newDocumentMenu.refs, newDocumentMenu.setIsOpen]);
 
+  // Handlers via ref, effect keyed on a content signature. Depending on the
+  // callbacks directly republishes on every render, and the host turns that
+  // into a re-render, which loops.
+  const createHandlersRef = useRef({ getCreationBaseFolderId, openCreateFolderDialog });
+  createHandlersRef.current = { getCreationBaseFolderId, openCreateFolderDialog };
+
+  const sharedTypeSignature = sharedNewDocumentMenuItems
+    .map(({ descriptor }) => `${descriptor.documentType}:${descriptor.defaultExtension}`)
+    .join('|');
+
+  useEffect(() => {
+    if (!registerCreateMenu) return undefined;
+
+    const markdown = sharedNewDocumentMenuItems.find(
+      ({ descriptor }) => descriptor.documentType === 'markdown'
+    );
+
+    registerCreateMenu({
+      destination: selectedFolderPath,
+      primaryTrailing: markdown?.descriptor.defaultExtension,
+      onPrimary: () => {
+        setCreateTargetFolderId(createHandlersRef.current.getCreationBaseFolderId());
+        if (markdown) setCreateDocumentDescriptor(markdown.descriptor);
+      },
+      onNewFolder: () => createHandlersRef.current.openCreateFolderDialog(),
+      // Markdown is the primary action, so it is not repeated in the list.
+      items: sharedNewDocumentMenuItems
+        .filter(({ descriptor }) => descriptor.documentType !== 'markdown')
+        .map(({ descriptor }) => ({
+          id: `${descriptor.documentType}:${descriptor.defaultExtension}`,
+          label: descriptor.displayName,
+          icon: descriptor.icon,
+          trailing: descriptor.defaultExtension,
+          onSelect: () => {
+            setCreateTargetFolderId(createHandlersRef.current.getCreationBaseFolderId());
+            setCreateDocumentDescriptor(descriptor);
+          },
+        })),
+    });
+    return () => registerCreateMenu(null);
+    // sharedNewDocumentMenuItems is read through its signature.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registerCreateMenu, sharedTypeSignature, selectedFolderPath]);
+
   const selectCreateDocumentType = useCallback((descriptor: CollabDocumentTypeDescriptor) => {
     if (!descriptor.capabilities.sharedCreate) return;
     newDocumentMenu.setIsOpen(false);
@@ -971,7 +1041,8 @@ export const CollabSidebar: React.FC<CollabSidebarProps> = ({
       const typePresentation = resolveSharedDocumentTypePresentation(node.document, documentTypeDescriptors);
 
       return (
-        <button
+        <SharedDocumentLink
+          href={host.surface === 'web_console' ? host.artifactUrl?.({ kind: 'document', scope, documentId: node.document.documentId, teamProjectId: node.document.teamProjectId }) : null}
           key={node.id}
           className={`group w-full flex items-center text-left file-tree-file${isActive ? ' active' : ''}`}
           style={{ paddingLeft: indent }}
@@ -987,8 +1058,23 @@ export const CollabSidebar: React.FC<CollabSidebarProps> = ({
           onContextMenu={(event) => handleContextMenu(event, node)}
           draggable
           onDragStart={(event) => {
-            event.dataTransfer.effectAllowed = 'move';
+            // `copyMove`, not `move`: the folder drop targets below still ask
+            // for `move` explicitly, while a surface that only *references* a
+            // document (a project canvas) asks for `copy` and would otherwise
+            // have its drop refused outright.
+            event.dataTransfer.effectAllowed = 'copyMove';
             event.dataTransfer.setData('text/plain', node.document.documentId);
+            // A second, self-describing payload for anything outside this tree.
+            // `text/plain` alone is a bare id: no org to address it in, and no
+            // title, so a card built from it would be labelled with a UUID.
+            event.dataTransfer.setData(
+              COLLAB_DOCUMENT_DRAG_TYPE,
+              JSON.stringify({
+                orgId: scope.orgId,
+                documentId: node.document.documentId,
+                title: node.name,
+              } satisfies CollabDocumentDragPayload),
+            );
             setDraggedDocument({
               documentId: node.document.documentId,
               sourcePath: node.path,
@@ -1019,6 +1105,7 @@ export const CollabSidebar: React.FC<CollabSidebarProps> = ({
                   : 'text-[var(--nim-text-faint)] opacity-0 group-hover:opacity-70 hover:!opacity-100'
               }`}
               onClick={(event) => {
+                event.preventDefault();
                 event.stopPropagation();
                 session.toggleFavorite(node.document.documentId);
               }}
@@ -1029,7 +1116,7 @@ export const CollabSidebar: React.FC<CollabSidebarProps> = ({
           {readReceiptsAvailable && showUnreadBubbles && (
             <DocUnreadDot documentId={node.document.documentId} className="mr-1" />
           )}
-        </button>
+        </SharedDocumentLink>
       );
     });
   }, [
@@ -1095,24 +1182,9 @@ export const CollabSidebar: React.FC<CollabSidebarProps> = ({
                 <MaterialSymbol icon="grid_view" size={16} />
               </button>
             )}
-            <button
-              ref={newDocumentMenu.refs.setReference}
-              {...newDocumentMenu.getReferenceProps()}
-              type="button"
-              className="workspace-action-button bg-transparent border-none p-1.5 cursor-pointer rounded text-[var(--nim-text-faint)] flex items-center justify-center transition-all duration-200 relative hover:bg-[var(--nim-bg-hover)] hover:text-[var(--nim-text)]"
-              title="New document"
-              onClick={event => openCreateDocumentMenu(event.currentTarget)}
-            >
-              <MaterialSymbol icon="note_add" size={16} />
-            </button>
-            <button
-              type="button"
-              className="workspace-action-button bg-transparent border-none p-1.5 cursor-pointer rounded text-[var(--nim-text-faint)] flex items-center justify-center transition-all duration-200 relative hover:bg-[var(--nim-bg-hover)] hover:text-[var(--nim-text)]"
-              title="New folder"
-              onClick={openCreateFolderDialog}
-            >
-              <MaterialSymbol icon="create_new_folder" size={16} />
-            </button>
+            {/* New document / New folder moved to the host's title-bar create
+                control, which sits directly over this tree. The folder context
+                menu still covers "create here". */}
             {readReceiptsAvailable && (
               <button
                 ref={overflowMenu.refs.setReference}
@@ -1166,28 +1238,13 @@ export const CollabSidebar: React.FC<CollabSidebarProps> = ({
       </div>
       )}
 
-      <div className="session-history-search px-3 py-2 border-b border-[var(--nim-border)] shrink-0 relative">
-          <input
-            type="text"
-            className="session-history-search-input nim-input w-full pl-3 pr-9 py-2 text-[13px] text-[var(--nim-text)] bg-[var(--nim-bg-secondary)] border border-[var(--nim-border)] rounded outline-none transition-colors duration-150 placeholder:text-[var(--nim-text-faint)] focus:border-[var(--nim-primary)] focus:bg-[var(--nim-bg)]"
-            placeholder="Search shared documents..."
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            aria-label="Search shared documents"
-          />
-          {hasActiveSearch && (
-            <button
-              type="button"
-              className="session-history-search-clear absolute right-5 top-1/2 -translate-y-1/2 flex items-center justify-center w-5 h-5 rounded text-[var(--nim-text-muted)] bg-transparent border-none cursor-pointer transition-colors duration-150 hover:bg-[var(--nim-bg-hover)] hover:text-[var(--nim-text)]"
-              onClick={() => setSearchQuery('')}
-              aria-label="Clear shared document search"
-              title="Clear search"
-            >
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-              </svg>
-            </button>
-          )}
+      <div className="session-history-search px-3 py-2 border-b border-[var(--nim-border)] shrink-0">
+        <CollabSearchInput
+          value={searchQuery}
+          onChange={setSearchQuery}
+          placeholder="Search shared documents..."
+          label="Search shared documents"
+        />
       </div>
 
       {/* Document tree */}

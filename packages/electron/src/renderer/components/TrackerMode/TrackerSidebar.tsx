@@ -4,6 +4,7 @@ import { MaterialSymbol } from '@nimbalyst/runtime';
 import type { TrackerIdentity, TrackerItemType } from '@nimbalyst/runtime';
 import { trackerDataLoadedAtom, trackerItemsArrayAtom } from '@nimbalyst/runtime/plugins/TrackerPlugin';
 import type { TrackerDataModel, TrackerFilterSet } from '@nimbalyst/runtime/plugins/TrackerPlugin/models';
+import type { Readiness } from '@nimbalyst/runtime/plugins/TrackerPlugin/models/trackerReadiness';
 import { generateKeyBetween } from '@nimbalyst/runtime/utils/fractionalIndex';
 import type { TrackerNavigationEntry, TrackerNavigationFolder, TrackerTypePlacement } from '@nimbalyst/runtime/sync';
 import {
@@ -30,7 +31,11 @@ import { toggleListEntry } from './trackerSidebarCollapse';
 import type { TrackerTeam } from './useTrackerTeamMembers';
 import type { OwnershipMember } from '../common/TrackerOwnershipChip';
 import { TrackerOwnershipSection } from './TrackerOwnershipSection';
-import { TrackerSavedViewsSection } from './TrackerSavedViewsSection';
+import {
+  ALL_TRACKERS_NAV_MODEL,
+  TrackerNavTypeRow,
+  TrackerSavedViewsSection,
+} from '@nimbalyst/collab-client/trackers-ui';
 import { trackerSyncConnectionAtom } from '../../store/atoms/trackerSync';
 import { trackerSnoozedUntilByItemIdAtom } from '../../store/atoms/trackerPersonalState';
 import { countInboxItems, type InboxSignals } from '@nimbalyst/runtime/plugins/TrackerPlugin/models';
@@ -60,6 +65,7 @@ interface TrackerSidebarProps {
   currentIdentity: TrackerIdentity | null;
   favoriteItemIds: ReadonlySet<string>;
   viewedAtByItemId: ReadonlyMap<string, number>;
+  readinessByItemId: ReadonlyMap<string, Readiness>;
   personalStateHydrated: boolean;
   recentlyViewedDays: 7 | 30 | 90 | null;
   columnFilters: TrackerFilterSet | null;
@@ -95,6 +101,7 @@ interface SidebarCountProps {
   currentIdentity: TrackerIdentity | null;
   favoriteItemIds: ReadonlySet<string>;
   viewedAtByItemId: ReadonlyMap<string, number>;
+  readinessByItemId: ReadonlyMap<string, Readiness>;
   personalStateHydrated: boolean;
   recentlyViewedDays: 7 | 30 | 90 | null;
   columnFilters: TrackerFilterSet | null;
@@ -115,6 +122,7 @@ function SidebarTypeCount({
   currentIdentity,
   favoriteItemIds,
   viewedAtByItemId,
+  readinessByItemId,
   personalStateHydrated,
   recentlyViewedDays,
   columnFilters,
@@ -127,8 +135,8 @@ function SidebarTypeCount({
     items,
     [type],
     { activeFilters, tagFilter, sourceFilter, recentlyViewedDays, columnFilters, statusScope },
-    { identity: currentIdentity, favoriteItemIds, viewedAtByItemId, nowMs },
-  ), [items, type, activeFilters, tagFilter, sourceFilter, currentIdentity, favoriteItemIds, viewedAtByItemId, recentlyViewedDays, columnFilters, statusScope, nowMs]);
+    { identity: currentIdentity, favoriteItemIds, viewedAtByItemId, readinessByItemId, nowMs },
+  ), [items, type, activeFilters, tagFilter, sourceFilter, currentIdentity, favoriteItemIds, viewedAtByItemId, readinessByItemId, recentlyViewedDays, columnFilters, statusScope, nowMs]);
   // NIM-631: before the tracker atoms finish hydrating, the count map is empty,
   // so populated types would flash "0" during a sync reconnect + renderer
   // reload. Suppress the badge until hydration completes rather than showing a
@@ -176,6 +184,7 @@ function SidebarFolderCount({
   currentIdentity,
   favoriteItemIds,
   viewedAtByItemId,
+  readinessByItemId,
   personalStateHydrated,
   recentlyViewedDays,
   columnFilters,
@@ -188,8 +197,8 @@ function SidebarFolderCount({
     items,
     types,
     { activeFilters, tagFilter, sourceFilter, recentlyViewedDays, columnFilters, statusScope },
-    { identity: currentIdentity, favoriteItemIds, viewedAtByItemId, nowMs },
-  ), [items, types, activeFilters, tagFilter, sourceFilter, currentIdentity, favoriteItemIds, viewedAtByItemId, recentlyViewedDays, columnFilters, statusScope, nowMs]);
+    { identity: currentIdentity, favoriteItemIds, viewedAtByItemId, readinessByItemId, nowMs },
+  ), [items, types, activeFilters, tagFilter, sourceFilter, currentIdentity, favoriteItemIds, viewedAtByItemId, readinessByItemId, recentlyViewedDays, columnFilters, statusScope, nowMs]);
   if (!loaded || (!personalStateHydrated && (
     activeFilters.some((filter) => filter === 'favorites' || filter === 'recently-viewed')
     || (columnFilters?.clauses ?? []).some(clause => clause.field === 'favorite' || clause.field === 'viewed')
@@ -209,6 +218,7 @@ export const TrackerSidebar: React.FC<TrackerSidebarProps> = ({
   currentIdentity,
   favoriteItemIds,
   viewedAtByItemId,
+  readinessByItemId,
   personalStateHydrated,
   recentlyViewedDays,
   columnFilters,
@@ -401,16 +411,30 @@ export const TrackerSidebar: React.FC<TrackerSidebarProps> = ({
     placement: TrackerTypePlacement,
     nested = false,
   ) => (
-    <button
+    <TrackerNavTypeRow
       key={tracker.type}
       draggable
       data-testid="tracker-type-button"
-      data-tracker-type={tracker.type}
-      className={`w-full flex items-center gap-2 pr-2 py-1.5 rounded-md text-sm transition-colors ${nested ? 'pl-7' : 'pl-2'} ${
-        selectedType === tracker.type
-          ? 'bg-nim-active text-nim'
-          : 'text-nim-muted hover:bg-nim-tertiary hover:text-nim'
-      }`}
+      tracker={tracker}
+      nested={nested}
+      selected={selectedType === tracker.type}
+      count={
+        <SidebarTypeCount
+          type={tracker.type as TrackerItemType}
+          activeFilters={activeFilters}
+          tagFilter={tagFilter}
+          sourceFilter={sourceFilter}
+          currentIdentity={currentIdentity}
+          favoriteItemIds={favoriteItemIds}
+          viewedAtByItemId={viewedAtByItemId}
+          readinessByItemId={readinessByItemId}
+          personalStateHydrated={personalStateHydrated}
+          recentlyViewedDays={recentlyViewedDays}
+          columnFilters={columnFilters}
+          statusScope={statusScope}
+          nowMs={filterClockMs}
+        />
+      }
       onClick={() => onSelectType(tracker.type)}
       onDragStart={(event) => {
         setDraggedEntryId(placement.entryId);
@@ -430,28 +454,7 @@ export const TrackerSidebar: React.FC<TrackerSidebarProps> = ({
         }
         setDraggedEntryId(null);
       }}
-    >
-      <span style={{ color: tracker.color }}>
-        <MaterialSymbol icon={tracker.icon} size={16} />
-      </span>
-      <span className="flex-1 text-left truncate">{tracker.displayNamePlural}</span>
-      <span className="text-[10px] font-semibold text-nim-faint min-w-[20px] text-right">
-        <SidebarTypeCount
-          type={tracker.type as TrackerItemType}
-          activeFilters={activeFilters}
-          tagFilter={tagFilter}
-          sourceFilter={sourceFilter}
-          currentIdentity={currentIdentity}
-          favoriteItemIds={favoriteItemIds}
-          viewedAtByItemId={viewedAtByItemId}
-          personalStateHydrated={personalStateHydrated}
-          recentlyViewedDays={recentlyViewedDays}
-          columnFilters={columnFilters}
-          statusScope={statusScope}
-          nowMs={filterClockMs}
-        />
-      </span>
-    </button>
+    />
   );
 
   return (
@@ -577,12 +580,9 @@ export const TrackerSidebar: React.FC<TrackerSidebarProps> = ({
           {ownershipSections === null && renderCreateFolderRow('personal')}
 
           {/* All */}
-          <button
-            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors ${
-              selectedType === 'all'
-                ? 'bg-nim-active text-nim'
-                : 'text-nim-muted hover:bg-nim-tertiary hover:text-nim'
-            }`}
+          <TrackerNavTypeRow
+            tracker={ALL_TRACKERS_NAV_MODEL}
+            selected={selectedType === 'all'}
             onClick={() => onSelectType('all')}
             onDragOver={(event) => {
               if (draggedEntry?.kind === 'type-placement') event.preventDefault();
@@ -592,10 +592,7 @@ export const TrackerSidebar: React.FC<TrackerSidebarProps> = ({
               if (draggedEntry?.kind === 'type-placement') appendTypeToFolder(draggedEntry, null);
               setDraggedEntryId(null);
             }}
-          >
-            <MaterialSymbol icon="checklist" size={16} />
-            <span className="flex-1 text-left truncate">All</span>
-          </button>
+          />
 
           {ownershipSections === null
             ? renderNavigationTree(navigationTree)
@@ -780,7 +777,7 @@ export const TrackerSidebar: React.FC<TrackerSidebarProps> = ({
                     {folder.name}
                   </button>
                 )}
-                <span className="text-[10px] font-semibold text-nim-faint min-w-[20px] text-right">
+                <span className="text-[10px] font-semibold text-nim-muted min-w-[20px] text-right tabular-nums">
                   <SidebarFolderCount
                     types={folderTypes.map((row) => row.tracker.type)}
                     activeFilters={activeFilters}
@@ -789,6 +786,7 @@ export const TrackerSidebar: React.FC<TrackerSidebarProps> = ({
                     currentIdentity={currentIdentity}
                     favoriteItemIds={favoriteItemIds}
                     viewedAtByItemId={viewedAtByItemId}
+                    readinessByItemId={readinessByItemId}
                     personalStateHydrated={personalStateHydrated}
                     recentlyViewedDays={recentlyViewedDays}
                     columnFilters={columnFilters}

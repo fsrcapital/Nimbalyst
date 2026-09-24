@@ -1,3 +1,4 @@
+// @vitest-environment node
 /**
  * Env-key hardening tests for sdkOptionsBuilder.
  *
@@ -15,6 +16,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../../../../host/hostEnvironment', () => ({
+  getHostEnvironment: () => ({ isPackaged: () => true }),
+}));
 
 vi.mock('electron', () => ({
   app: {
@@ -134,8 +139,8 @@ describe('buildSdkOptions env-key hardening', () => {
       makeParams({ shellEnv: { ANTHROPIC_API_KEY: 'sk-ant-leaked-shellenv' } })
     );
 
-    expect(options.env.ANTHROPIC_API_KEY).toBeUndefined();
-    expect(options.env.OPENAI_API_KEY).toBeUndefined();
+    expect(options.env!.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(options.env!.OPENAI_API_KEY).toBeUndefined();
   });
 
   it('ignores ANTHROPIC_API_KEY that settingsEnv might carry', async () => {
@@ -149,8 +154,8 @@ describe('buildSdkOptions env-key hardening', () => {
       })
     );
 
-    expect(options.env.ANTHROPIC_API_KEY).toBeUndefined();
-    expect(options.env.SOME_OTHER_FLAG).toBe('1');
+    expect(options.env!.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(options.env!.SOME_OTHER_FLAG).toBe('1');
   });
 
   it('uses the configured API key from provider config when present', async () => {
@@ -161,7 +166,7 @@ describe('buildSdkOptions env-key hardening', () => {
       makeParams()
     );
 
-    expect(options.env.ANTHROPIC_API_KEY).toBe('sk-ant-user-configured');
+    expect(options.env!.ANTHROPIC_API_KEY).toBe('sk-ant-user-configured');
   });
 
   it('sets the base env flags buildSdkOptions applies to every spawn', async () => {
@@ -174,8 +179,8 @@ describe('buildSdkOptions env-key hardening', () => {
     // 'true' = unconditional tool-search deferral: every MCP server except the
     // alwaysLoad core defers regardless of the model's context window. The old
     // 'auto:2' default meant a 20K-token eager floor on 1M-context models.
-    expect(options.env.ENABLE_TOOL_SEARCH).toBe('true');
-    expect(options.env.CLAUDE_CODE_ENTRYPOINT).toBe('cli');
+    expect(options.env!.ENABLE_TOOL_SEARCH).toBe('true');
+    expect(options.env!.CLAUDE_CODE_ENTRYPOINT).toBe('cli');
   });
 
   it('forwards an explicit high effort selection instead of using the CLI default', async () => {
@@ -184,16 +189,25 @@ describe('buildSdkOptions env-key hardening', () => {
       makeParams()
     );
 
-    expect(options.env.CLAUDE_CODE_EFFORT_LEVEL).toBe('high');
+    expect(options.env!.CLAUDE_CODE_EFFORT_LEVEL).toBe('high');
   });
 
   it('disables SDK extended thinking for supported Claude Agent models', async () => {
     const { options } = await buildSdkOptions(
-      makeDeps({ config: { thinkingMode: 'disabled' } }),
+      makeDeps({ resolveModelVariant: () => 'claude-opus-5', config: { thinkingMode: 'disabled' } }),
       makeParams()
     );
 
     expect(options.thinking).toEqual({ type: 'disabled' });
+  });
+
+  it.each(['opus', 'claude-opus-5-5', 'claude-opus-5-5[1m]'])('ignores persisted thinking Off for %s while preserving effort', async (model) => {
+    const { options } = await buildSdkOptions(
+      makeDeps({ resolveModelVariant: () => model, config: { thinkingMode: 'disabled', effortLevel: 'high' } }),
+      makeParams(),
+    );
+    expect(options.thinking).toBeUndefined();
+    expect(options.env!.CLAUDE_CODE_EFFORT_LEVEL).toBe('high');
   });
 
   it('omits the SDK thinking option when extended thinking is enabled', async () => {
@@ -228,19 +242,17 @@ describe('buildSdkOptions env-key hardening', () => {
 
     const { options } = await buildSdkOptions(makeDeps(), makeParams());
 
-    expect(options.env.DISABLE_AUTOUPDATER).toBe('1');
-    expect(options.env.DISABLE_UPDATES).toBe('1');
+    expect(options.env!.DISABLE_AUTOUPDATER).toBe('1');
+    expect(options.env!.DISABLE_UPDATES).toBe('1');
   });
 
-  it('lets a user-configured DISABLE_AUTOUPDATER override the default (NIM-1573)', async () => {
-    delete process.env.DISABLE_AUTOUPDATER;
-
-    const { options } = await buildSdkOptions(
-      makeDeps(),
-      makeParams({ settingsEnv: { DISABLE_AUTOUPDATER: '0' } })
-    );
-
-    expect(options.env.DISABLE_AUTOUPDATER).toBe('0');
+  it.each(['process', 'shellEnv', 'settingsEnv'] as const)('#1476: prevents updater overrides from %s', async (source) => {
+    const overrides = { DISABLE_AUTOUPDATER: '0', DISABLE_UPDATES: '0' };
+    if (source === 'process') Object.assign(process.env, overrides);
+    const deps = makeDeps();
+    const { options } = await buildSdkOptions(deps, makeParams(source === 'process' ? {} : { [source]: overrides }));
+    expect(options.env).toMatchObject({ DISABLE_AUTOUPDATER: '1', DISABLE_UPDATES: '1' });
+    expect(deps.teammateManager.packagedBuildOptions.env).toMatchObject({ DISABLE_AUTOUPDATER: '1', DISABLE_UPDATES: '1' });
   });
 
   it('disables the CLI git-status snapshot by default on every spawn (#1177)', async () => {
@@ -254,7 +266,7 @@ describe('buildSdkOptions env-key hardening', () => {
 
     const { options } = await buildSdkOptions(makeDeps(), makeParams());
 
-    expect(options.env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS).toBe('1');
+    expect(options.env!.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS).toBe('1');
   });
 
   it.each(['settingsEnv', 'shellEnv'] as const)(
@@ -267,7 +279,7 @@ describe('buildSdkOptions env-key hardening', () => {
         makeParams({ [source]: { CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS: '0' } })
       );
 
-      expect(options.env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS).toBe('0');
+      expect(options.env!.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS).toBe('0');
     }
   );
 
@@ -276,7 +288,7 @@ describe('buildSdkOptions env-key hardening', () => {
 
     const { options } = await buildSdkOptions(makeDeps(), makeParams());
 
-    expect(options.env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS).toBe('0');
+    expect(options.env!.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS).toBe('0');
   });
 
   it('lets a user-configured ENABLE_TOOL_SEARCH override the default', async () => {
@@ -290,6 +302,6 @@ describe('buildSdkOptions env-key hardening', () => {
       makeParams({ settingsEnv: { ENABLE_TOOL_SEARCH: 'false' } })
     );
 
-    expect(options.env.ENABLE_TOOL_SEARCH).toBe('false');
+    expect(options.env!.ENABLE_TOOL_SEARCH).toBe('false');
   });
 });

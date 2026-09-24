@@ -52,7 +52,7 @@ export function getEditorToolSchemas(sessionId: string | undefined) {
     {
       name: "readCollabDoc",
       description:
-        "Read the current contents of a shared collaborative document (collab:// URI). Use this whenever you need to see the document text — the filesystem Read tool does NOT work for collab:// URIs because the document lives in Yjs, not on disk. Returns the live Lexical/Yjs content the user is currently looking at.",
+        "Read the current contents of a shared collaborative document (collab:// URI). Use this whenever you need to see the document text — the filesystem Read tool does NOT work for collab:// URIs because the document lives in Yjs, not on disk. Works whether or not the document is open in a tab; the content comes from the shared document itself, so it reflects what every collaborator currently has.",
       inputSchema: {
         type: "object",
         properties: {
@@ -61,6 +61,10 @@ export function getEditorToolSchemas(sessionId: string | undefined) {
             description:
               "The collab:// URI of the shared document to read (e.g. 'collab://org:abc:doc:xyz').",
           },
+          includeDecisionState: {
+            type: "boolean",
+            description: "Include a bounded read-only snapshot of current human answers and separate agent recommendations for extant decision blocks. Supplemental state is not editable document source; default false.",
+          },
         },
         required: ["filePath"],
       },
@@ -68,7 +72,7 @@ export function getEditorToolSchemas(sessionId: string | undefined) {
     {
       name: "applyCollabDocEdit",
       description:
-        "Apply text replacements to a collaborative shared document (collab:// URI). Use this when the active document is a shared/collaborative document — filesystem Edit/Write will NOT propagate via Yjs and will not reach other collaborators. Replacements are applied through the live Lexical/Yjs editor so other connected users see the change in realtime. Call readCollabDoc first to see the current content before editing.",
+        "Apply text replacements to a collaborative shared document (collab:// URI). Use this when the target is a shared/collaborative document — filesystem Edit/Write will NOT propagate via Yjs and will not reach other collaborators. Works whether or not the document is open in a tab, and other connected users see the change in realtime. Call readCollabDoc first to see the current content before editing.",
       inputSchema: {
         type: "object",
         properties: {
@@ -102,7 +106,7 @@ export function getEditorToolSchemas(sessionId: string | undefined) {
     {
       name: "readCollabDocComments",
       description:
-        "Read inline comment threads from a collaborative document. Returns structured user/agent authorship, reply targets, resolved state, and anchor attachment state. This does not read the document body.",
+        "Read inline comment threads from a collaborative document. Returns structured user/agent authorship, reply targets, resolved state, and each thread's structured anchor plus its attachment state, whether or not the document is open. This does not read the document body.",
       inputSchema: {
         type: "object",
         properties: {
@@ -169,7 +173,7 @@ export function getEditorToolSchemas(sessionId: string | undefined) {
     {
       name: "createCollabDocComment",
       description:
-        "Create an inline comment under this agent session's identity, anchored by exact visible text plus optional prefix/suffix context. Ambiguous or stale anchors fail instead of guessing.",
+        "Create an inline comment under this agent session's identity. Text-quote anchors require a mounted Markdown editor; entity anchors require a mounted adapter or headless codec to confirm the target. Missing, stale, ambiguous, or rejected anchors fail instead of guessing.",
       inputSchema: {
         type: "object",
         properties: {
@@ -178,22 +182,55 @@ export function getEditorToolSchemas(sessionId: string | undefined) {
             description: "The collab:// URI of the shared document.",
           },
           anchor: {
-            type: "object",
-            properties: {
-              exact: {
-                type: "string",
-                description: "Exact selected text, up to 4 KiB encoded.",
+            oneOf: [
+              {
+                type: "object",
+                properties: {
+                  kind: {
+                    type: "string",
+                    enum: ["text-quote"],
+                    description:
+                      "Optional for compatibility; text-quote is inferred when omitted.",
+                  },
+                  exact: {
+                    type: "string",
+                    description: "Exact selected text, up to 4 KiB encoded.",
+                  },
+                  prefix: {
+                    type: "string",
+                    description: "Optional immediately preceding context, up to 512 bytes.",
+                  },
+                  suffix: {
+                    type: "string",
+                    description: "Optional immediately following context, up to 512 bytes.",
+                  },
+                },
+                required: ["exact"],
               },
-              prefix: {
-                type: "string",
-                description: "Optional immediately preceding context, up to 512 bytes.",
+              {
+                type: "object",
+                properties: {
+                  kind: { type: "string", enum: ["entity"] },
+                  entityType: {
+                    type: "string",
+                    description: "Stable entity type, up to 512 encoded bytes.",
+                  },
+                  entityId: {
+                    type: "string",
+                    description: "Stable entity id, up to 512 encoded bytes.",
+                  },
+                  field: {
+                    type: "string",
+                    description: "Optional stable entity field, up to 512 encoded bytes.",
+                  },
+                  labelSnapshot: {
+                    type: "string",
+                    description: "Optional presentation fallback, up to 4 KiB encoded.",
+                  },
+                },
+                required: ["kind", "entityType", "entityId"],
               },
-              suffix: {
-                type: "string",
-                description: "Optional immediately following context, up to 512 bytes.",
-              },
-            },
-            required: ["exact"],
+            ],
           },
           body: {
             type: "string",
@@ -237,7 +274,11 @@ export function getEditorToolSchemas(sessionId: string | undefined) {
   return tools;
 }
 
-export async function handleApplyDiff(args: any): Promise<McpToolResult> {
+export async function handleApplyDiff(
+  args: any,
+  sessionId?: string,
+  workspacePath?: string,
+): Promise<McpToolResult> {
   const typedArgs = args as
     | { filePath?: string; replacements?: any[] }
     | undefined;
@@ -250,11 +291,14 @@ export async function handleApplyDiff(args: any): Promise<McpToolResult> {
     };
   }
 
-  const targetWindow = await findWindowForFilePath(targetFilePath);
+  // A shared document is addressable whether or not it is on screen; a file on
+  // disk still has to be resolved through the window that owns it.
+  const targetWindow = isCollabUri(targetFilePath)
+    ? await resolveCollabDocWindow(targetFilePath, workspacePath)
+    : await findWindowForFilePath(targetFilePath);
   if (targetWindow) {
     // applyDiff supports markdown files on disk (.md) and collaborative
-    // shared documents addressed by collab:// URIs (which are always markdown
-    // and live in Yjs, not on disk).
+    // shared documents addressed by collab:// URIs.
     if (!targetFilePath.endsWith(".md") && !isCollabUri(targetFilePath)) {
       return {
         content: [
@@ -267,10 +311,26 @@ export async function handleApplyDiff(args: any): Promise<McpToolResult> {
       };
     }
 
+    // Presence is a courtesy to other collaborators, not a precondition for
+    // the edit, so an unresolvable session identity must not fail the write.
+    let agent: { sessionId: string; sessionName: string } | undefined;
+    if (isCollabUri(targetFilePath) && sessionId) {
+      try {
+        agent = await resolveAgentIdentity(sessionId, workspacePath);
+      } catch {
+        agent = undefined;
+      }
+    }
+
     const outcome = await requestFromRenderer<{ success?: boolean; error?: string }>(
       targetWindow,
       "mcp:applyDiff",
-      { replacements: typedArgs?.replacements, targetFilePath },
+      {
+        replacements: typedArgs?.replacements,
+        targetFilePath,
+        workspacePath,
+        ...(agent ? { agent } : {}),
+      },
       { timeoutMs: 30000 },
     );
     if (outcome.status === "timedOut") {
@@ -300,11 +360,38 @@ export async function handleApplyDiff(args: any): Promise<McpToolResult> {
 }
 
 /**
- * readCollabDoc — return the current text of a shared collaborative document
- * by asking the renderer to pull it directly out of the live Lexical/Yjs
- * editor. Filesystem Read does not work for collab:// URIs.
+ * Resolve the window that should service a collab:// request.
+ *
+ * `findWindowForFilePath` matches on a session's ACTIVE document, so it finds
+ * nothing (and throws) for a document that is merely closed — or open but not
+ * active. That is not a reason to refuse the request: any window on the right
+ * workspace can reach the room headlessly (NIM-3754).
  */
-export async function handleReadCollabDoc(args: any): Promise<McpToolResult> {
+async function resolveCollabDocWindow(
+  targetFilePath: string,
+  workspacePath: string | undefined,
+): Promise<BrowserWindow | null> {
+  try {
+    const mounted = await findWindowForFilePath(targetFilePath);
+    if (mounted) return mounted;
+  } catch {
+    // Fall through to the workspace window.
+  }
+  if (!workspacePath) return null;
+  const workspaceWindowId = await findWindowIdForWorkspacePath(workspacePath);
+  return workspaceWindowId === null ? null : BrowserWindow.fromId(workspaceWindowId);
+}
+
+/**
+ * readCollabDoc — return the current text of a shared collaborative document.
+ *
+ * Served from the live editor when one is mounted, and from the room itself
+ * otherwise. Filesystem Read does not work for collab:// URIs.
+ */
+export async function handleReadCollabDoc(
+  args: any,
+  workspacePath?: string,
+): Promise<McpToolResult> {
   const targetFilePath = args?.filePath;
   if (!isCollabUri(targetFilePath)) {
     return {
@@ -318,7 +405,7 @@ export async function handleReadCollabDoc(args: any): Promise<McpToolResult> {
     };
   }
 
-  const targetWindow = await findWindowForFilePath(targetFilePath);
+  const targetWindow = await resolveCollabDocWindow(targetFilePath, workspacePath);
   if (!targetWindow) {
     return {
       content: [{ type: "text", text: `Error: No window available for ${targetFilePath}` }],
@@ -326,11 +413,13 @@ export async function handleReadCollabDoc(args: any): Promise<McpToolResult> {
     };
   }
 
-  const outcome = await requestFromRenderer<{ success: boolean; content?: string; error?: string }>(
+  const outcome = await requestFromRenderer<{ success: boolean; content?: string; decisionState?: unknown; error?: string }>(
     targetWindow,
     "mcp:readCollabDoc",
-    { targetFilePath },
-    { timeoutMs: 10000 },
+    { targetFilePath, workspacePath, ...(args?.includeDecisionState === true ? { includeDecisionState: true } : {}) },
+    // Generous enough to cover a cold headless acquisition, whose own
+    // hydration budget is 10s, without hanging the tool call indefinitely.
+    { timeoutMs: 15000 },
   );
   if (outcome.status === "timedOut") {
     return {
@@ -345,7 +434,12 @@ export async function handleReadCollabDoc(args: any): Promise<McpToolResult> {
     };
   }
   return {
-    content: [{ type: "text", text: outcome.response.content ?? "" }],
+    content: [
+      { type: "text", text: outcome.response.content ?? "" },
+      ...(args?.includeDecisionState === true && outcome.response.decisionState !== undefined
+        ? [{ type: "text", text: `Read-only decision state (supplemental; do not write into document source). Agent recommendations are not human votes or quorum.\n${JSON.stringify(outcome.response.decisionState)}` }]
+        : []),
+    ],
     isError: false,
   };
 }
@@ -358,7 +452,11 @@ export async function handleReadCollabDoc(args: any): Promise<McpToolResult> {
  * make it clear when the agent is editing the live shared document, and so
  * the system preamble can call out a single canonical name.
  */
-export async function handleApplyCollabDocEdit(args: any): Promise<McpToolResult> {
+export async function handleApplyCollabDocEdit(
+  args: any,
+  sessionId?: string,
+  workspacePath?: string,
+): Promise<McpToolResult> {
   const targetFilePath = args?.filePath;
   if (!isCollabUri(targetFilePath)) {
     return {
@@ -371,12 +469,89 @@ export async function handleApplyCollabDocEdit(args: any): Promise<McpToolResult
       isError: true,
     };
   }
-  return handleApplyDiff(args);
+  return handleApplyDiff(args, sessionId, workspacePath);
 }
 
 type CollabCommentOperation = "list" | "reply" | "createAnchored";
 
-async function resolveAgentIdentity(
+function normalizeStructuredCommentAnchor(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const anchor = value as Record<string, unknown>;
+  if (
+    (anchor.kind === undefined || anchor.kind === "text-quote") &&
+    typeof anchor.exact === "string"
+  ) {
+    return {
+      kind: "text-quote",
+      exact: anchor.exact,
+      ...(typeof anchor.prefix === "string" ? { prefix: anchor.prefix } : {}),
+      ...(typeof anchor.suffix === "string" ? { suffix: anchor.suffix } : {}),
+    };
+  }
+  if (
+    anchor.kind === "entity" &&
+    typeof anchor.entityType === "string" &&
+    typeof anchor.entityId === "string"
+  ) {
+    return {
+      kind: "entity",
+      entityType: anchor.entityType,
+      entityId: anchor.entityId,
+      ...(typeof anchor.field === "string" ? { field: anchor.field } : {}),
+      ...(typeof anchor.labelSnapshot === "string"
+        ? { labelSnapshot: anchor.labelSnapshot }
+        : {}),
+    };
+  }
+  // Future anchor kinds remain readable. The renderer marks them unsupported;
+  // normalization only strips non-JSON values before returning the payload.
+  try {
+    return JSON.parse(JSON.stringify(anchor));
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeCollabCommentToolResult(
+  operation: CollabCommentOperation,
+  result: unknown,
+  inputAnchor: unknown,
+): unknown {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return result;
+  }
+  const record = result as Record<string, unknown>;
+  if (operation === "list" && Array.isArray(record.threads)) {
+    return {
+      ...record,
+      threads: record.threads.map((value) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          return value;
+        }
+        const thread = value as Record<string, unknown>;
+        const anchor = normalizeStructuredCommentAnchor(thread.anchor);
+        return {
+          ...thread,
+          ...(anchor === undefined ? {} : { anchor }),
+        };
+      }),
+    };
+  }
+  // Reply and create both report the anchor the thread is actually stored
+  // with, so an agent gets the same structured target from every operation.
+  // `inputAnchor` only backstops a controller that returned none.
+  const anchor = normalizeStructuredCommentAnchor(
+    record.anchor ?? (operation === "createAnchored" ? inputAnchor : undefined),
+  );
+  return {
+    ...record,
+    ...(anchor === undefined ? {} : { anchor }),
+  };
+}
+
+export async function resolveAgentIdentity(
   sessionId: string | undefined,
   workspacePath: string | undefined,
 ): Promise<{ sessionId: string; sessionName: string }> {
@@ -433,20 +608,7 @@ async function handleCollabCommentOperation(
     };
   }
 
-  let targetWindow: BrowserWindow | null = null;
-  try {
-    targetWindow = await findWindowForFilePath(targetFilePath);
-  } catch {
-    // A closed collab:// document has no mounted document-state entry. Fall
-    // through to the workspace window so renderer can use the headless path.
-  }
-  if (!targetWindow && workspacePath) {
-    const workspaceWindowId =
-      await findWindowIdForWorkspacePath(workspacePath);
-    targetWindow = workspaceWindowId === null
-      ? null
-      : BrowserWindow.fromId(workspaceWindowId);
-  }
+  const targetWindow = await resolveCollabDocWindow(targetFilePath, workspacePath);
   if (!targetWindow) {
     return {
       content: [{
@@ -517,12 +679,15 @@ async function handleCollabCommentOperation(
   }
 
   const result = outcome.response;
+  const normalizedResult = result?.success
+    ? normalizeCollabCommentToolResult(operation, result.result, args?.anchor)
+    : undefined;
   return {
     content: [{
       type: "text",
       text: JSON.stringify(
         result?.success
-          ? result.result
+          ? normalizedResult
           : {
               error: {
                 code: result?.code || "COMMENT_OPERATION_FAILED",

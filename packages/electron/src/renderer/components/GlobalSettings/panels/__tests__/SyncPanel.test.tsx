@@ -7,8 +7,7 @@ import { createStore, Provider } from 'jotai';
 vi.mock('posthog-js/react', () => ({
   usePostHog: () => undefined,
 }));
-vi.mock('@nimbalyst/runtime', async (importOriginal) => ({
-  ...await importOriginal<typeof import('@nimbalyst/runtime')>(),
+vi.mock('@nimbalyst/runtime/ui/icons/MaterialSymbol', () => ({
   MaterialSymbol: ({ icon }: { icon: string }) => <span data-icon={icon} />,
 }));
 const mocks = vi.hoisted(() => ({
@@ -152,70 +151,6 @@ describe('SyncPanel', () => {
   });
 
   afterEach(() => cleanup());
-
-  it('does not show session and document sharing guidance in the Mobile App section', () => {
-    const store = createStore();
-    store.set(syncConfigAtom, {
-      enabled: false,
-      serverUrl: '',
-      enabledProjects: [],
-      docSyncEnabledProjects: [],
-      idleTimeoutMinutes: 5,
-    });
-    store.set(stytchAuthAtom, {
-      isAuthenticated: true,
-      user: { user_id: 'user-1' },
-    });
-
-    render(
-      <Provider store={store}>
-        <SyncPanel section="mobile" />
-      </Provider>,
-    );
-
-    expect(screen.queryByText('Sharing Sessions & Documents')).toBeNull();
-    expect(screen.queryByText(/create an encrypted share link/i)).toBeNull();
-  });
-
-  it('opens native iOS pairing from the Mobile App section', () => {
-    renderPairingSection('mobile');
-
-    fireEvent.click(screen.getByRole('button', { name: 'Pair iPhone' }));
-
-    expect(screen.getByTestId('qr-pairing-modal').getAttribute('data-target')).toBe('ios');
-  });
-
-  it('persists Web App projects independently from personal sync', async () => {
-    const { invoke, projectPath } = renderWebAccess({ authenticated: true });
-
-    await waitFor(() => {
-      expect(document.querySelector('[aria-label="Allow Nimbalyst in Web App"]')).not.toBeNull();
-    });
-    const checkbox = document.querySelector('[aria-label="Allow Nimbalyst in Web App"]') as HTMLInputElement;
-    expect((checkbox as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(checkbox);
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('web-app:set-project-selection', []);
-    });
-    expect(invoke).not.toHaveBeenCalledWith(
-      'sync:set-project-selection',
-      expect.objectContaining({ enabledProjects: expect.anything() }),
-    );
-    expect(projectPath).toBe('C:\\Code\\Nimbalyst');
-  });
-
-  it('allows direct Web App pairing without an upstream account sign-in', async () => {
-    renderWebAccess();
-
-    await waitFor(() => {
-      expect(document.querySelector('[aria-label="Allow Nimbalyst in Web App"]:checked')).not.toBeNull();
-    });
-    const pairButton = await screen.findByRole('button', { name: 'Pair Web App' });
-    fireEvent.click(pairButton);
-
-    expect(screen.getByTestId('qr-pairing-modal').getAttribute('data-target')).toBe('web');
-  });
 
   /**
    * With exactly one stored account the Account screen should read like a

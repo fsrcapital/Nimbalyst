@@ -11,7 +11,7 @@ import { getFolderContents } from '../utils/FileTree';
 import { getBackgroundColor, getTitleBarColors } from '../theme/ThemeManager';
 import { ElectronDocumentService, setupDocumentServiceHandlers } from '../services/ElectronDocumentService';
 import { ElectronFileSystemService } from '../services/ElectronFileSystemService';
-import { isWorktreePath, resolveProjectPath } from '../utils/workspaceDetection';
+import { isWorktreePath, resolveProjectPath, resolveProjectPathCandidates } from '../utils/workspaceDetection';
 import { getPreloadPath } from '../utils/appPaths';
 import { createUnresponsiveHandler } from './unresponsiveHandler';
 import {
@@ -31,12 +31,18 @@ import { addNimAssetRoot } from '../protocols/nimAssetProtocol';
 import { addNimPreviewWorkspaceRoot } from '../protocols/nimPreviewProtocol';
 import { scheduleAttachmentStagingCleanup } from '../services/attachments/attachmentStagingCleanup';
 import { windows, windowStates, anyWindowReferencesWorkspace, resolveDocumentServicePath, getWindowIdForWindow } from './windowState';
+import {
+    matchWorkspaceWindow,
+    type WorkspaceWindowCandidate,
+    type WorkspaceWindowMatch,
+} from './workspaceWindowMatch';
 import { shouldSaveSessionOnWindowClose } from './sessionSaveOnClose';
 import {
     registerCustomTitleBarWindow,
     registerFullScreenChrome,
     titleBarOptionsForWindow,
 } from './windowChrome';
+import { cascadeWindowBounds, restoreVisibleWindowBounds } from './windowBounds';
 
 // Window management
 export { windows, windowStates };
@@ -203,38 +209,27 @@ export function createWindow(
             // console.log('[MAIN] Using icon at:', iconPath);
         }
 
-        // Calculate window position with cascading effect
-        let x: number | undefined;
-        let y: number | undefined;
-        let width = 1024;
-        let height = 768;
-
-        if (savedBounds) {
-            // Use saved bounds from session
-            x = savedBounds.x;
-            y = savedBounds.y;
-            width = savedBounds.width;
-            height = savedBounds.height;
-        } else {
-            // Get the display containing the cursor
+        let resolvedBounds;
+        if (!savedBounds) {
             const cursorPoint = screen.getCursorScreenPoint();
             const display = screen.getDisplayNearestPoint(cursorPoint);
-
-            // Calculate position with cascading offset
-            x = display.bounds.x + 100 + windowPositionOffset;
-            y = display.bounds.y + 100 + windowPositionOffset;
-
-            // Update offset for next window (wrap around after 10 windows)
+            resolvedBounds = cascadeWindowBounds(display.bounds, windowPositionOffset, {
+                width: 1024,
+                height: 768,
+            });
             windowPositionOffset = (windowPositionOffset + WINDOW_CASCADE_OFFSET) % (WINDOW_CASCADE_OFFSET * 10);
-
-            // Make sure window is not off screen
-            if (x + width > display.bounds.x + display.bounds.width) {
-                x = display.bounds.x + 100;
-            }
-            if (y + height > display.bounds.y + display.bounds.height) {
-                y = display.bounds.y + 100;
-            }
+        } else {
+            const savedCenter = {
+                x: Math.round(savedBounds.x + savedBounds.width / 2),
+                y: Math.round(savedBounds.y + savedBounds.height / 2),
+            };
+            resolvedBounds = restoreVisibleWindowBounds(
+                savedBounds,
+                screen.getAllDisplays().map((display) => display.workArea),
+                screen.getDisplayNearestPoint(savedCenter).workArea,
+            );
         }
+        const { x, y, width, height } = resolvedBounds;
 
         // Passed to the renderer as a query param so it can apply the theme on
         // first paint; this is the persisted id, extension themes included.
@@ -777,64 +772,47 @@ export function findWindowByFilePath(filePath: string): BrowserWindow | null {
  * @returns The BrowserWindow for that workspace, or null if not found
  */
 export function findWindowByWorkspace(workspacePath: string): BrowserWindow | null {
-    // First try exact match — primary or any rail-warm additional path.
-    // Prefer windows where the path is currently active so MCP routes to
-    // the visible project when several windows host the same workspace.
-    let bestActiveMatch: BrowserWindow | null = null;
-    let bestAnyMatch: BrowserWindow | null = null;
+    return findWorkspaceWindowMatch(workspacePath)?.window ?? null;
+}
 
-    for (const [windowId, window] of windows) {
+/** A window that can host the workspace, plus how it currently relates to it. */
+export interface WorkspaceWindowMatchResult extends WorkspaceWindowMatch {
+    window: BrowserWindow;
+}
+
+/**
+ * Same lookup as `findWindowByWorkspace`, but it also reports whether the
+ * matched window is *showing* the workspace. Callers that reuse a window need
+ * that: a window keeps referencing every rail project, so the window that has
+ * Project-A may be displaying Project-B, and focusing it changes nothing on
+ * screen (https://github.com/nimbalyst/nimbalyst/issues/1427).
+ */
+export function findWorkspaceWindowMatch(workspacePath: string): WorkspaceWindowMatchResult | null {
+    const candidates: WorkspaceWindowCandidate[] = [];
+    for (const [windowId] of windows) {
         const state = windowStates.get(windowId);
         if (!state) continue;
-
-        const isActive = (state.activeWorkspacePath ?? state.workspacePath) === workspacePath;
-        const isReferenced =
-            state.workspacePath === workspacePath ||
-            state.additionalWorkspacePaths?.includes(workspacePath) === true;
-
-        if (isActive) {
-            bestActiveMatch = window;
-            break;
-        }
-        if (isReferenced && !bestAnyMatch) {
-            bestAnyMatch = window;
-        }
+        candidates.push({
+            windowId,
+            workspacePath: state.workspacePath,
+            activeWorkspacePath: state.activeWorkspacePath,
+            additionalWorkspacePaths: state.additionalWorkspacePaths,
+        });
     }
 
-    if (bestActiveMatch) return bestActiveMatch;
-    if (bestAnyMatch) return bestAnyMatch;
+    // resolveProjectPathCandidates lets the match see through a symlinked or
+    // case-variant spelling, so a window opened as `~/dev/x` is still found when
+    // a worktree resolves the request to `~/Dev/x` (#1551).
+    const match = matchWorkspaceWindow(candidates, workspacePath, {
+        isWorktreePath,
+        resolveProjectPath,
+        resolveProjectPathCandidates,
+    });
+    if (!match) return null;
 
-    // If the given path is a worktree, try to find window by parent project path
-    if (isWorktreePath(workspacePath)) {
-        const projectPath = resolveProjectPath(workspacePath);
-        for (const [windowId, window] of windows) {
-            const state = windowStates.get(windowId);
-            if (!state) continue;
-            if (
-                state.workspacePath === projectPath ||
-                state.additionalWorkspacePaths?.includes(projectPath)
-            ) {
-                return window;
-            }
-        }
-    }
-
-    // If the given path is a project path, check if any window is a worktree of that project
-    for (const [windowId, window] of windows) {
-        const state = windowStates.get(windowId);
-        if (!state) continue;
-        const candidatePaths: string[] = [];
-        if (state.workspacePath) candidatePaths.push(state.workspacePath);
-        if (state.additionalWorkspacePaths) candidatePaths.push(...state.additionalWorkspacePaths);
-
-        for (const candidate of candidatePaths) {
-            if (isWorktreePath(candidate) && resolveProjectPath(candidate) === workspacePath) {
-                return window;
-            }
-        }
-    }
-
-    return null;
+    const window = windows.get(match.windowId);
+    if (!window) return null;
+    return { ...match, window };
 }
 
 /**

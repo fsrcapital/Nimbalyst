@@ -18,7 +18,7 @@ import {
 } from '../store/atoms/openProjects';
 import { prRemoteAtom } from '../store/atoms/pullRequests';
 import { developerModeAtom } from '../store/atoms/appSettings';
-import { sessionLaunchPopupRequestAtom } from '../store/atoms/appCommands';
+import { sessionLaunchPopupRequestAtom, trackerQuickCreateRequestAtom } from '../store/atoms/appCommands';
 import posthog from 'posthog-js';
 
 interface KeyboardShortcutsOptions {
@@ -85,6 +85,14 @@ export function isSessionLaunchPopupShortcut(
   return isAppModifier && event.shiftKey && !event.altKey && event.key.toLowerCase() === 'n';
 }
 
+export function isTrackerQuickCreateShortcut(
+  event: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey'>,
+  macPlatform = isMac,
+): boolean {
+  const isAppModifier = macPlatform ? event.metaKey : event.ctrlKey;
+  return isAppModifier && event.shiftKey && !event.altKey && event.key.toLowerCase() === 'i';
+}
+
 export function isToggleSidebarShortcut(
   event: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey'>,
   macPlatform = isMac,
@@ -94,6 +102,25 @@ export function isToggleSidebarShortcut(
     && !event.shiftKey
     && !event.altKey
     && event.key.toLowerCase() === 'b';
+}
+
+/**
+ * True when the keystroke landed inside a rich-text surface, where Cmd/Ctrl+B
+ * means bold. This listener runs in the capture phase, so without this check it
+ * preventDefaults the keystroke before Lexical's own root-element handler ever
+ * sees it and the editor can never bold anything.
+ *
+ * Plain inputs, textareas and Monaco (which types into a hidden textarea) are
+ * not editable regions, so the sidebar shortcut still applies there — matching
+ * VS Code's Cmd+B in code.
+ */
+export function isRichTextEditingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  // jsdom never sets isContentEditable, so fall back to the nearest declared
+  // editing host — which is also how a target nested inside the editor matches.
+  const host = target.closest<HTMLElement>('[contenteditable]');
+  return host !== null && host.getAttribute('contenteditable') !== 'false';
 }
 
 export function useKeyboardShortcuts({
@@ -145,7 +172,18 @@ export function useKeyboardShortcuts({
         return;
       }
 
-      if (workspaceMode && isToggleSidebarShortcut(e)) {
+      // Cmd/Ctrl+Shift+I opens (or toggles) the tracker quick-create popup from
+      // anywhere, without changing the active content mode.
+      if (workspaceMode && isTrackerQuickCreateShortcut(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        store.set(trackerQuickCreateRequestAtom, (version) => version + 1);
+        return;
+      }
+
+      // Cmd/Ctrl+B toggles the active left pane, except inside a rich-text
+      // editor where it is bold.
+      if (workspaceMode && isToggleSidebarShortcut(e) && !isRichTextEditingTarget(e.target)) {
         e.preventDefault();
         e.stopPropagation();
         toggleActiveLeftPane();
@@ -199,6 +237,10 @@ export function useKeyboardShortcuts({
 
       // Cmd+T for Tracker mode (toggle the sidebar if already in tracker mode)
       if (workspaceMode && isAppModifier && !e.shiftKey && !e.altKey && e.key === 't') {
+        // Quick Track owns Cmd+T while it is open. This listener runs in the
+        // capture phase, before the popup's React handler can preventDefault,
+        // so arbitrate on the popup marker instead of the event state.
+        if (document.querySelector('.tracker-quick-create-popup')) return;
         e.preventDefault();
         if (isFullscreenPanelActive) {
           exitFullscreenPanel();
@@ -263,8 +305,11 @@ export function useKeyboardShortcuts({
           store.set(toggleCliTerminalDrawerAtom, activeSessionId);
         }
       }
-      // Cmd+Shift+K for Kanban view (switch to agent mode + kanban, or toggle if already there)
-      if (workspaceMode && isAppModifier && e.shiftKey && e.key === 'k') {
+      // Cmd+Shift+K for Kanban view (switch to agent mode + kanban, or toggle if already there).
+      // With Shift held the browser reports the uppercase letter, so a lowercase
+      // `key` match never fires (#1415).
+      if (workspaceMode && isAppModifier && e.shiftKey
+          && (e.code === 'KeyK' || e.key.toLowerCase() === 'k')) {
         e.preventDefault();
         e.stopPropagation();
 
@@ -296,8 +341,11 @@ export function useKeyboardShortcuts({
         }
       }
 
-      // Cmd+Alt+W (Mac) or Ctrl+Alt+W (Windows) to create new worktree session
-      if (workspaceMode && isAppModifier && e.altKey && e.key === 'w') {
+      // Cmd+Alt+W (Mac) or Ctrl+Alt+W (Windows) to create new worktree session.
+      // `code` as well as `key`: with Option held, macOS rewrites the character
+      // (Option+W is "∑"), so the letter alone is not enough to match on.
+      if (workspaceMode && isAppModifier && e.altKey
+          && (e.key.toLowerCase() === 'w' || e.code === 'KeyW')) {
         e.preventDefault();
         e.stopPropagation();
 

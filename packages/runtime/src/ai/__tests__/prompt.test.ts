@@ -12,8 +12,8 @@ describe('buildClaudeCodeSystemPrompt', () => {
     expect(prompt).toContain('`PromptForUserInput` (server: `nimbalyst`)');
     expect(prompt).toContain('call an interactive tool instead');
     expect(prompt).toContain('Combine questions into one multi-field prompt');
-    expect(prompt).toContain('Repeatedly call `functions.wait`');
-    expect(prompt).toContain('Never end the turn or ask the user to resubmit while that cell is still running');
+    expect(prompt).toContain('keep calling `functions.wait`');
+    expect(prompt).toContain('Do not issue a final response while the question call is pending.');
   });
 
   it('formats interactive input tool references for claude-style prompts', () => {

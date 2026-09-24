@@ -17,6 +17,7 @@
 import {
   CLAUDE_MODELS,
   OPENAI_MODELS,
+  canDisableClaudeThinking,
   CLAUDE_CODE_VARIANT_VERSIONS,
   CLAUDE_CODE_MODEL_LABELS,
   type ClaudeCodeVariant,
@@ -32,6 +33,9 @@ export {
   parseEffortLevel,
   parseThinkingMode,
   resolveThinkingMode,
+  clampEffortLevel,
+  getAvailableEffortLevels,
+  resolveEffortCeiling,
 } from '@nimbalyst/runtime/ai/server/effortLevels';
 
 interface ModelInfo {
@@ -181,6 +185,9 @@ export function getProviderDisplayName(provider: string): string {
     case 'openai': return 'OpenAI';
     case 'lmstudio': return 'LMStudio';
     case 'copilot-cli': return 'GitHub Copilot';
+    case 'grok-build': return 'Grok Build';
+    case 'cursor-agent': return 'Cursor Agent';
+    case 'antigravity-gemini-agent': return 'Gemini';
     default: return provider;
   }
 }
@@ -268,6 +275,7 @@ export function supportsEffortLevel(modelId?: string): boolean {
   if (
     variant === 'fable' ||
     variant === 'opus' ||
+    variant === 'opus-5' ||
     variant === 'opus-4-7' ||
     variant === 'opus-4-6' ||
     variant === 'sonnet' ||
@@ -280,18 +288,10 @@ export function supportsEffortLevel(modelId?: string): boolean {
   return false;
 }
 
-/**
- * Check if a model supports explicit Claude Agent extended-thinking toggling.
- * Fable/Haiku-style lightweight variants do not accept the SDK thinking option.
- *
- * Matches every opus/sonnet variant (including pinned ones like `opus-4-7` and
- * `sonnet-4-6`) so this stays in lock-step with the server-side
- * `canDisableThinkingForModel` gate in sdkOptionsBuilder. If the two drift, a
- * model can have thinking disabled on the server with no UI toggle to restore it.
- */
+/** Whether this agent model allows users to turn adaptive thinking off. */
 export function supportsThinkingToggle(modelId?: string): boolean {
   if (!modelId) return false;
   const variant = extractClaudeCodeVariant(modelId);
   if (!variant) return false;
-  return variant.startsWith('opus') || variant.startsWith('sonnet');
+  return canDisableClaudeThinking(variant);
 }

@@ -344,6 +344,21 @@ export class ElectronCollabHost implements CollabHost<ElectronDocsCapability> {
     return (await this.ensureDataSource()).getMembers();
   }
 
+  onMembersChanged(cb: () => void): () => void {
+    let unsubscribe: (() => void) | null = null;
+    let cancelled = false;
+    void this.ensureDataSource().then((source) => {
+      if (cancelled) return;
+      unsubscribe = source.onMembersChanged(cb);
+    }).catch((error) => {
+      console.error('[ElectronCollabHost] Failed to observe member directory:', error);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }
+
   openArtifact(ref: CollabArtifactRef, source: CollabOpenSource): void {
     if (!this.openArtifactImpl) {
       throw new Error('This Electron host was created without a navigation adapter');
@@ -444,9 +459,10 @@ export class ElectronCollabHost implements CollabHost<ElectronDocsCapability> {
     }
     if (!result.success || !result.config) {
       const message = result.error || 'No team found for this project';
-      throw new CollabScopeResolutionError(message, {
-        retryable: !message.includes('Not authenticated') && !message.includes('No team found'),
-      });
+      // The resolver knows whether its own failure was terminal; classifying by
+      // substring here read a timed-out team-directory fetch as a definitive
+      // "this project has no team" and latched the mode off for the session.
+      throw new CollabScopeResolutionError(message, { retryable: result.retryable === true });
     }
     const { orgId, teamProjectId, serverUrl, teamMemberId, userName, userEmail, urlExtraQuery } = result.config;
     return {
@@ -470,6 +486,12 @@ export class ElectronCollabHost implements CollabHost<ElectronDocsCapability> {
       },
       onConversationDescriptorUpdated: (descriptor) => {
         void applyConversationDescriptorBroadcast({ orgId: scope.orgId, descriptor });
+      },
+      onDocumentFeedbackIndex: (state) => {
+        void window.electronAPI.invoke('document-feedback-index:replace', {
+          workspacePath: scope.scopeKey, orgId: scope.orgId,
+          teamMemberId: scope.indexConfig.teamMemberId, state,
+        }).catch(error => console.error('[ElectronCollabHost] Document feedback index failed:', error));
       },
       onFeedbackIndexLoaded: (entries) => {
         void window.electronAPI.invoke('feedback-request-index:replace-snapshot', {

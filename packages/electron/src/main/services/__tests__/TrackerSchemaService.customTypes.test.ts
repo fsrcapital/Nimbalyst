@@ -16,9 +16,9 @@ const { mockSafeHandle, mockWatch, mockWindowSend } = vi.hoisted(() => ({
   mockWindowSend: vi.fn(),
 }));
 
-vi.mock('electron', () => ({
+vi.mock('electron', async () => ({
   app: {
-    getPath: vi.fn(() => '/tmp'),
+    getPath: (await import('../../../../test-stubs/privateUserData')).testApp.getPath,
     isPackaged: false,
     getName: vi.fn(() => 'Nimbalyst'),
     getVersion: vi.fn(() => '0.0.0-test'),
@@ -54,6 +54,16 @@ vi.mock('chokidar', () => ({
 // tolerate a null database, so returning null preserves test intent.
 vi.mock('../../database/initialize', () => ({
   getDatabase: () => null,
+}));
+
+// Schema projection only needs a team-name lookup here. Loading TeamService
+// pulls in the runtime and sync/auth graph, timing out setup under suite load.
+vi.mock('../TeamService', () => ({
+  findTeamForWorkspace: vi.fn(async () => null),
+}));
+// Watcher attribution is not exercised by these direct schema operations.
+vi.mock('../TrackerIdentityService', () => ({
+  getCurrentIdentity: vi.fn(() => ({})),
 }));
 
 /** The destructive-change guard rail's opt-in, on every schema write path. */
@@ -364,6 +374,28 @@ describe('TrackerSchemaService builtin override via patch', () => {
     const override = await service.getWorkspaceTrackerSchemaOverride(workspacePath, 'bug');
     expect(override.overridden).toBe(true);
     expect(path.basename(override.filePath!)).toBe('bug.patch.yaml');
+  });
+
+  it('opens an existing patch override instead of throwing on it (NIM-3065)', async () => {
+    // A patch has no `displayName` by design, and this path used to run the
+    // full-model parser over it: the throw meant the IPC handler never returned
+    // a filePath, so the Settings "Edit schema override" pencil silently did
+    // nothing for every overridden builtin.
+    await fs.writeFile(
+      path.join(trackersDir, 'bug.patch.yaml'),
+      `type: bug\nfields:\n  - name: status\n    options:\n      set:\n        - value: wont-fix\n          label: Wont Fix\n          icon: block\n`,
+      'utf-8',
+    );
+    service.updateTrackerSchemaWorkspace(null);
+    service.updateTrackerSchemaWorkspace(workspacePath);
+
+    const opened = await service.customizeWorkspaceTrackerSchema(workspacePath, 'bug');
+
+    expect(opened.created).toBe(false);
+    expect(path.basename(opened.filePath)).toBe('bug.patch.yaml');
+    // Resolved against the builtin seed, so it is a usable model, not the delta.
+    expect(opened.model.type).toBe('bug');
+    expect(opened.model.displayName).toBeTruthy();
   });
 
   it('resets a patch override back to the builtin default', async () => {

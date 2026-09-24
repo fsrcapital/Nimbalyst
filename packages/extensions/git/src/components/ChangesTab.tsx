@@ -36,10 +36,20 @@ interface ChangesTabProps {
   onWorkspaceEvent: (event: string, handler: () => void) => (() => void);
   /** Switch to the Output tab to show operation details */
   onShowOutput: () => void;
+  /**
+   * Reports this repo's changed-file count, so an all-repos view can badge a
+   * collapsed section. Absent for the ordinary single-repo tab.
+   */
+  onCountChange?: (count: number) => void;
   /** Whether the file mask is enabled (filter applied) */
   fileMaskEnabled: boolean;
   /** Comma-separated glob patterns for the file mask */
   fileMaskInput: string;
+  /**
+   * Bumped by the panel's Refresh button. The button lives in the shared header,
+   * so this counter is the only way it can reach the file list. (#1400)
+   */
+  refreshToken: number;
 }
 
 interface SuccessResult {
@@ -207,6 +217,8 @@ export function ChangesTab({
   onShowOutput,
   fileMaskEnabled,
   fileMaskInput,
+  refreshToken,
+  onCountChange,
 }: ChangesTabProps) {
   // One flat list of changes: staged/unstaged/untracked are merged, since the
   // selection (not the index) is what gets committed.
@@ -331,6 +343,10 @@ export function ChangesTab({
       setChanges(mergeWorkingChanges(result));
       setConflicted(result.conflicted.map(f => ({ path: f.path, status: 'C' })));
       setLoadError(null);
+      // Cached diffs describe the working tree we just re-read, so they expire
+      // with it. Bumping here covers every caller -- discard and commit both
+      // reloaded without invalidating, and served diffs for deleted content.
+      setDiffInvalidationToken(t => t + 1);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error('[ChangesTab] Failed to load changes:', message);
@@ -342,12 +358,11 @@ export function ChangesTab({
 
   useEffect(() => {
     loadChanges();
-  }, [loadChanges]);
+  }, [loadChanges, refreshToken]);
 
   useEffect(() => {
     return onWorkspaceEvent('git:status-changed', () => {
       loadChanges();
-      setDiffInvalidationToken(t => t + 1);
     });
   }, [onWorkspaceEvent, loadChanges]);
 
@@ -360,6 +375,10 @@ export function ChangesTab({
     () => conflicted.filter(f => matchesFileMask(f.path, maskPatterns)),
     [conflicted, maskPatterns],
   );
+
+  useEffect(() => {
+    onCountChange?.(filteredChanges.length + filteredConflicted.length);
+  }, [filteredChanges.length, filteredConflicted.length, onCountChange]);
 
   // Drop selections that are no longer visible (filtered out or removed from working tree)
   useEffect(() => {
@@ -476,10 +495,20 @@ export function ChangesTab({
   const handleCommitWithAI = useCallback(() => {
     if (selectedFiles.length === 0) return;
     // App.tsx opens a new session seeded with a commit request for exactly these files.
+    //
+    // Paths go out ABSOLUTE. `workspacePath` here is the repo the picker
+    // selected, which in a multi-root workspace need not be the session's
+    // primary root -- and a repo-relative path resolved against the primary
+    // root points at the wrong repo, or at nothing.
     window.dispatchEvent(new CustomEvent('nimbalyst:commit-with-ai', {
       detail: {
         workspacePath,
-        files: selectedFiles.map(f => ({ path: f.path, status: f.status })),
+        repoPath: workspacePath,
+        files: selectedFiles.map(f => ({
+          path: f.path.startsWith('/') ? f.path : `${workspacePath}/${f.path}`,
+          status: f.status,
+          repo: workspacePath,
+        })),
       },
     }));
   }, [selectedFiles, workspacePath]);

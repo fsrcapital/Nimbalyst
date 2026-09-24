@@ -122,7 +122,9 @@ import {
   autoMatchTeamForWorkspace,
   bindWorkspaceToSharedProject,
   findTeamForWorkspace,
+  getTeamByOrgId,
   invalidateListTeamsCache,
+  listTeams,
   registerTeamHandlers,
 } from '../TeamService';
 import { refreshPersonalSessionForAccount } from '../StytchAuthService';
@@ -526,6 +528,28 @@ describe('listTeams TTL cache + invalidation (RC4)', () => {
     expect(apiTeamsFetchCallCount()).toBe(2);
   });
 
+  it('rejects array-only consumers on server discovery failure and recovers without caching emptiness', async () => {
+    await listTeams();
+    invalidateListTeamsCache();
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ code: 'TEAM_DIRECTORY_UNAVAILABLE', error: 'Organizations unavailable' }) });
+    await expect(listTeams()).rejects.toThrow('Organization directory is unavailable');
+    await expect(listTeams()).resolves.toEqual([expect.objectContaining({ orgId: 'org-1' })]);
+    expect(apiTeamsFetchCallCount()).toBe(3);
+  });
+
+  it('does not flatten an unavailable directory into "org not found" for a single-org lookup', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ code: 'TEAM_DIRECTORY_UNAVAILABLE', error: 'Organizations unavailable' }) });
+    await expect(getTeamByOrgId('org-1')).rejects.toThrow('Organization directory is unavailable');
+    await expect(getTeamByOrgId('org-1')).resolves.toEqual(expect.objectContaining({ orgId: 'org-1' }));
+    await expect(getTeamByOrgId('org-absent')).resolves.toBeNull();
+  });
+
+  it('rejects a malformed successful response instead of caching an empty directory', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) });
+    await expect(listTeams()).rejects.toThrow('Organization directory is unavailable');
+    await expect(listTeams()).resolves.toEqual([expect.objectContaining({ orgId: 'org-1' })]);
+  });
+
   it('refreshes the account personal JWT rather than retrying discovery with an active team JWT', async () => {
     vi.mocked(refreshPersonalSessionForAccount).mockResolvedValueOnce('fresh-personal-jwt' as never);
     fetchMock
@@ -587,10 +611,10 @@ describe('autoMatchTeamForWorkspace across the JWT arrival gap', () => {
     vi.useRealTimers();
   });
 
-  it('retries a lookup that could not complete, and starts tracker sync once it does', async () => {
-    fetchMock
-      .mockRejectedValueOnce(new Error('Not authenticated. Sign in first.'))
-      .mockImplementation(okTeams([{
+  it.each(['auth', 'server'])('recovers tracker startup after an incomplete %s lookup', async (failure) => {
+    if (failure === 'auth') fetchMock.mockRejectedValueOnce(new Error('Not authenticated. Sign in first.'));
+    else fetchMock.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({ error: 'Organizations unavailable' }) });
+    fetchMock.mockImplementation(okTeams([{
         orgId: 'org-1', name: 'Widgets Team', gitRemoteHash: REMOTE_HASH,
         teamProjectId: 'tp-1', createdAt: new Date().toISOString(), role: 'admin',
       }]));
@@ -790,5 +814,94 @@ describe('post-sign-in project walk', () => {
       })).rejects.toThrow(/clone/i);
       expect(workspaceStates.get('/projects/unrelated')?.localOrgBinding).toBeUndefined();
     });
+  });
+});
+
+describe('listTeams stampede on mid-flight invalidation (NIM-3711)', () => {
+  /** Let queued microtasks (the fetch call, the cache settle handler) run. */
+  const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+
+  /** A /api/teams response that does not resolve until the test releases it. */
+  function gatedTeamsFetch(): () => void {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    fetchMock.mockImplementation(async () => {
+      await gate;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          teams: [{
+            orgId: 'org-1', name: 'Widgets Team', gitRemoteHash: REMOTE_HASH,
+            createdAt: new Date().toISOString(), role: 'admin',
+          }],
+        }),
+      };
+    });
+    return release;
+  }
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    invalidateListTeamsCache();
+  });
+
+  afterEach(async () => {
+    await flush();
+    invalidateListTeamsCache();
+  });
+
+  it('does not open a second request when the cache is invalidated mid-flight', async () => {
+    const release = gatedTeamsFetch();
+
+    const first = listTeams();
+    await flush();
+    expect(apiTeamsFetchCallCount()).toBe(1);
+
+    // What actually happened at startup: fetchTeamApi refreshed an expiring
+    // personal JWT, the refresh emitted an authenticated auth-state change,
+    // and the change handler invalidated the directory cache -- while this
+    // request was still on the wire. The next caller must join it, not race it.
+    invalidateListTeamsCache();
+    const second = listTeams();
+    await flush();
+
+    release();
+    await Promise.all([first, second]);
+
+    expect(apiTeamsFetchCallCount()).toBe(1);
+  });
+
+  it('does not cache an answer that was invalidated while in flight', async () => {
+    const release = gatedTeamsFetch();
+
+    const first = listTeams();
+    await flush();
+    invalidateListTeamsCache();
+    release();
+    await first;
+    await flush();
+
+    // The answer satisfied its joined callers, but it predates the
+    // invalidation, so it must not be served to anyone new.
+    await listTeams();
+    expect(apiTeamsFetchCallCount()).toBe(2);
+  });
+
+  it('opens a fresh request for forceFresh callers even while one is on the wire', async () => {
+    const release = gatedTeamsFetch();
+
+    const background = listTeams();
+    await flush();
+    expect(apiTeamsFetchCallCount()).toBe(1);
+
+    // The manual Refresh affordance asks for state that may have changed since
+    // the outstanding request started, so joining it would defeat the point.
+    const refreshed = listTeams({ forceFresh: true });
+    await flush();
+    expect(apiTeamsFetchCallCount()).toBe(2);
+
+    release();
+    await Promise.all([background, refreshed]);
   });
 });

@@ -48,6 +48,7 @@ export const SYNC_RELEVANT_FIELDS = {
   metadataKeys: [
     'phase',
     'tags',
+    'hostDeviceId',
     'myNotes',
     'nextAction',
     'waitingOn',

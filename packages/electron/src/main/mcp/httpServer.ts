@@ -1,3 +1,4 @@
+import { handleConsumeSessionInbox } from './tools/consumeSessionInbox';
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -63,6 +64,11 @@ import {
   getEditorToolSchemas,
 } from "./tools/editorToolHandlers";
 import {
+  CANVAS_WORKING_SET_TOOL_SCHEMAS,
+  handleDeclareCanvasWorkingSet,
+  handleReleaseCanvasWorkingSet,
+} from "./tools/canvasWorkingSetToolHandlers";
+import {
   handleCreateSharedDoc,
   handleCreateSharedFolder,
   handleMoveSharedItem,
@@ -81,6 +87,8 @@ import {
 } from "./tools/requestFeedbackToolHandler";
 import {
   handleTrackerList,
+  handleTrackerReady,
+  handleWorkRadar,
   handleTrackerGet,
   handleTrackerListTypes,
   handleTrackerDefineType,
@@ -600,6 +608,7 @@ function createSharedMcpServer(
 
     const builtInTools: Array<{ name: string; description: string; inputSchema: any }> = [
       ...getEditorToolSchemas(sessionId),
+      ...CANVAS_WORKING_SET_TOOL_SCHEMAS.map((tool) => ({ ...tool })),
       ...getCollabIndexToolSchemas(),
       ...getCollabReadToolSchemas(),
       ...getRequestFeedbackToolSchemas(),
@@ -663,14 +672,17 @@ function createSharedMcpServer(
 
     try {
       switch (toolName) {
+        case 'consume_session_inbox':
+          if (extra.requestId === undefined) throw new Error('Inbox request identity is required');
+          return handleConsumeSessionInbox(sessionId, request);
         case "applyDiff":
-          return handleApplyDiff(args);
+          return handleApplyDiff(args, sessionId, workspacePath);
 
         case "applyCollabDocEdit":
-          return handleApplyCollabDocEdit(args);
+          return handleApplyCollabDocEdit(args, sessionId, workspacePath);
 
         case "readCollabDoc":
-          return handleReadCollabDoc(args);
+          return handleReadCollabDoc(args, workspacePath);
 
         case "readCollabDocComments":
           return handleReadCollabDocComments(args, workspacePath);
@@ -688,6 +700,12 @@ function createSharedMcpServer(
             sessionId,
             workspacePath,
           );
+
+        case "declareCanvasWorkingSet":
+          return handleDeclareCanvasWorkingSet(args, sessionId, workspacePath);
+
+        case "releaseCanvasWorkingSet":
+          return handleReleaseCanvasWorkingSet(args, sessionId, workspacePath);
 
         case "createSharedDoc":
           return handleCreateSharedDoc(args, workspacePath);
@@ -743,6 +761,12 @@ function createSharedMcpServer(
 
         case "tracker_list":
           return handleTrackerList(args, workspacePath);
+
+        case "tracker_ready":
+          return handleTrackerReady(args, workspacePath);
+
+        case "work_radar":
+          return handleWorkRadar(args, workspacePath);
 
         case "tracker_get":
           return handleTrackerGet(args, workspacePath);
@@ -853,6 +877,28 @@ function createSharedMcpServer(
 }
 
 // ---- HTTP Transport Helpers ----
+
+/**
+ * The MCP Streamable HTTP spec requires an Accept header naming both
+ * `application/json` and `text/event-stream`; the SDK's transport 406s any
+ * request missing either ("Not Acceptable: Client must accept both...").
+ *
+ * Not every MCP client sends one. Antigravity's `call_mcp_tool` bridge does
+ * not, and every tool call it makes is rejected before reaching a handler --
+ * observed live, logged only as `[MCP:nimbalyst] Server error`, which gives a
+ * user nothing to act on. This is a loopback server that can always answer
+ * with either content type, so correcting a noncompliant header costs nothing
+ * and beats failing a client whose request shape we do not control.
+ *
+ * Groundwork for connecting Antigravity to these endpoints, but the leniency
+ * stands on its own for any client with the same gap.
+ */
+export function ensureMcpAcceptHeader(accept: string | undefined): string {
+  if (accept?.includes("application/json") && accept.includes("text/event-stream")) {
+    return accept;
+  }
+  return "application/json, text/event-stream";
+}
 
 function getMcpSessionIdHeader(req: IncomingMessage): string | undefined {
   const headerValue = req.headers["mcp-session-id"];
@@ -1045,6 +1091,12 @@ async function tryCreateServer(port: number): Promise<any> {
         // Endpoint-path routing: which split server (or legacy full surface)
         // this connection serves. null for non-/mcp paths (handled below).
         const mcpEndpoint = resolveMcpEndpoint(pathname);
+
+        // See ensureMcpAcceptHeader: not every MCP client sends an Accept
+        // header the SDK's transport will take.
+        if (isMcpEndpoint(pathname)) {
+          req.headers.accept = ensureMcpAcceptHeader(req.headers.accept);
+        }
 
         // Handle SSE GET request to establish connection
         if (isMcpEndpoint(pathname) && req.method === "GET") {

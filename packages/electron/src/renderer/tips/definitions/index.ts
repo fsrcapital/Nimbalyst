@@ -8,7 +8,9 @@
 import type { TipDefinition } from '../types';
 import { actionPromptsTip } from './action-prompts';
 import { agentDiagramTip } from './agent-diagram';
+import { animationDiscoverTip } from './animation-discover';
 import { autoCommitTip } from './auto-commit';
+import { canvasDiscoverTip } from './canvas-discover';
 import { claudeMdTip } from './claude-md';
 import { contentSearchTip } from './content-search';
 import { datamodelDiscoverTip } from './datamodel-discover';
@@ -23,6 +25,7 @@ import { mobileKeepAwakeTip } from './mobile-keep-awake';
 import { mobilePairedTip } from './mobile-paired';
 import { mockupDiscoverTip } from './mockup-discover';
 import { quickOpenTip } from './quick-open';
+import { nimbalystCoachTip } from './nimbalyst-coach';
 import { sessionCleanupTip } from './session-cleanup';
 import { sessionLaunchShortcutTip } from './session-launch-shortcut';
 import { sessionSharedTip } from './session-shared';
@@ -51,6 +54,8 @@ export const tips: TipDefinition[] = [
   mockupDiscoverTip,
   datamodelDiscoverTip,
   spreadsheetDiscoverTip,
+  animationDiscoverTip,
+  canvasDiscoverTip,
   // Sharing
   teamsMultiplayerTip,
   sessionSharedTip,
@@ -65,4 +70,5 @@ export const tips: TipDefinition[] = [
   actionPromptsTip,
   lightningInterruptTip,
   sessionCleanupTip,
+  nimbalystCoachTip,
 ];

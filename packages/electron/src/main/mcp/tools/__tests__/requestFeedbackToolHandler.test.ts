@@ -229,6 +229,52 @@ describe('RequestFeedback drafting', () => {
     expect(getResourceSharingStatus).toHaveBeenCalledTimes(2);
   });
 
+  it('delivers an already-shared file as its document id, not the author\'s path', async () => {
+    const getResourceSharingStatus = vi.fn(async (
+      kind: ResourceSharingResult['kind'],
+      sourceId: string,
+    ): Promise<ResourceSharingResult> => ({
+      ...sharing(kind, sourceId, true),
+      documentId: `doc-${sourceId.replace(/\W/g, '-')}`,
+    }));
+    const result = await draftRequestFeedback({
+      recipients: [{ key: 'reviewer', nameOrEmail: 'karl@example.test' }],
+      asks: [{
+        type: 'singleSelect',
+        id: 'direction',
+        label: 'Direction',
+        description: 'Which should we build?',
+        options: [{ id: 'a', label: 'A' }],
+        artifacts: [{
+          entryId: 'a',
+          kind: 'file',
+          sourceId: '/Users/author/mockups/a.html',
+          label: 'Direction A',
+        }],
+      }],
+      subjects: [{ kind: 'file', sourceId: '/Users/author/mockups/a.html', label: 'Direction A' }],
+    }, WORKSPACE, {
+      findOrgMembers: vi.fn(async () => matched('karl', 'Karl Jones', 'karl@example.test')),
+      getResourceSharingStatus,
+    });
+
+    // A shared subject is excluded from the refs the compose surface publishes,
+    // so this is the only place the rewrite can happen. Left as a `file`, the
+    // recipient receives an absolute path on someone else's disk.
+    const documentRef = {
+      kind: 'document',
+      sourceId: 'doc--Users-author-mockups-a-html',
+      projectId: ORG.teamProjectId,
+    };
+    expect(result).toMatchObject({
+      status: 'draftReady',
+      draft: {
+        subjects: [{ shared: true, ref: documentRef }],
+        asks: [{ artifacts: [{ entryId: 'a', ref: documentRef }] }],
+      },
+    });
+  });
+
   it('refuses artifacts on an ask type that cannot show one', async () => {
     await expect(draftRequestFeedback({
       recipients: [{ key: 'reviewer', nameOrEmail: 'karl@example.test' }],
@@ -265,4 +311,17 @@ describe('RequestFeedback drafting', () => {
     });
     expect(getResourceSharingStatus).not.toHaveBeenCalled();
   });
+});
+
+
+it('requires the approved host to be a shared document subject and preserves that host in the draft', async () => {
+  const dependencies = {
+    findOrgMembers: vi.fn(async () => matched('karl', 'Karl Jones', 'karl@example.test')),
+    getResourceSharingStatus: vi.fn(async (kind: ResourceSharingResult['kind'], id: string) => sharing(kind, id, true)),
+  };
+  const input = { recipients: [{ key: 'reviewer', nameOrEmail: 'Karl' }], asks: [confirmAsk], hostDocumentId: 'doc-plan' };
+  const rejected = await draftRequestFeedback(input, WORKSPACE, dependencies);
+  expect(rejected).toMatchObject({ status: 'invalidDraft', errors: [{ code: 'invalidHostDocument' }] });
+  const ready = await draftRequestFeedback({ ...input, subjects: [{ kind: 'document', sourceId: 'doc-plan', label: 'Shared plan.md' }] }, WORKSPACE, dependencies);
+  expect(ready).toMatchObject({ status: 'draftReady', draft: { hostDocumentId: 'doc-plan' } });
 });

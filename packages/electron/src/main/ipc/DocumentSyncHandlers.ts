@@ -15,13 +15,14 @@ import { safeHandle } from '../utils/ipcRegistry';
 import { logger } from '../utils/logger';
 import { getCollabSyncWsUrl, getCollabSyncHttpUrl } from '../utils/collabSyncUrl';
 import { isAuthenticated, getStytchUserId, getUserEmail, getAuthState, getPersonalUserId, getPersonalSessionJwt, refreshPersonalSessionDetailed } from '../services/StytchAuthService';
-import { findTeamForWorkspace, getOrgScopedJwt } from '../services/TeamService';
+import { findTeamForWorkspace, resolveTeamForWorkspace, getOrgScopedJwt } from '../services/TeamService';
 import { getOrgIdFromJwt, getJwtExp, getSubFromJwt } from '../services/jwtOrg';
 import { getWorkspaceState, updateWorkspaceState } from '../utils/store';
 import { createSingleFlight } from '../utils/asyncCache';
 import { getDialogDefaultPath, rememberDialogSelection } from '../utils/dialogPaths';
 import { getPersonalDocSyncConfig, isSyncEnabled } from '../services/SyncManager';
 import { resolveCollabDocumentType } from './collabDocumentTypeResolver';
+import { drainLegacyPendingUpdates } from './legacyPendingUpdateDrain';
 import { getSyncId } from '../services/DocSyncService';
 import {
   registerCollabAssetDocument,
@@ -31,7 +32,7 @@ import {
 } from '../protocols/collabAssetProtocol';
 import { uploadCollabAsset } from '../services/CollabAssetUploader';
 import { asTeamMemberId } from '@nimbalyst/runtime/auth/jwtScopes';
-import { MAX_COLLAB_ASSET_BYTES } from '../../shared/collabAssetFormat';
+import { MAX_COLLAB_ASSET_BYTES } from '@nimbalyst/runtime/sync/collabAssetFormat';
 import {
   scanMarkdownImageRefs,
   resolveAssetRef,
@@ -182,21 +183,31 @@ export function registerDocumentSyncHandlers(): void {
     });
 
     const accountId = getPersonalUserId() ?? activeMemberId;
-    if (pendingUpdateBase64) {
-      try {
-        const legacyUpdateCommitted = await getCollabDocumentReplicaStore().migrateLegacyPendingUpdate(
-          { accountId, orgId, documentId: payload.documentId },
-          resolvedDocumentType ?? 'markdown',
-          Buffer.from(pendingUpdateBase64, 'base64'),
-        );
-        if (legacyUpdateCommitted) {
-          updateWorkspaceState(payload.workspacePath, state => {
-            delete state.collabPendingUpdates?.[pendingKey];
-          });
-          pendingUpdateBase64 = undefined;
-        }
-      } catch (error) {
-        logger.main.error('[DocumentSyncHandlers] Failed to migrate legacy pending update:', error);
+    const pendingUpdates = workspaceState.collabPendingUpdates;
+    if (pendingUpdates && Object.keys(pendingUpdates).length > 0) {
+      // Drain every legacy entry, not only the document being opened. Entries for
+      // documents the user never reopens used to accumulate in workspace settings
+      // and inflate the cost of every workspace-state read in the main process.
+      const { migrated } = await drainLegacyPendingUpdates({
+        pending: pendingUpdates,
+        accountId,
+        resolveDocumentType: documentId =>
+          resolveCollabDocumentType({
+            callerDocumentType: documentId === payload.documentId ? payload.documentType : undefined,
+            workspaceState: workspaceState as unknown as { openCollabDocumentEntries?: unknown },
+            documentId,
+          }),
+        migrate: (identity, documentType, update) =>
+          getCollabDocumentReplicaStore().migrateLegacyPendingUpdate(identity, documentType, update),
+        onError: (key, error) =>
+          logger.main.error('[DocumentSyncHandlers] Failed to migrate legacy pending update:', key, error),
+      });
+
+      if (migrated.length > 0) {
+        updateWorkspaceState(payload.workspacePath, state => {
+          for (const key of migrated) delete state.collabPendingUpdates?.[key];
+        });
+        if (migrated.includes(pendingKey)) pendingUpdateBase64 = undefined;
       }
     }
 
@@ -1000,18 +1011,25 @@ export function registerDocumentSyncHandlers(): void {
     workspacePath: string;
   }) {
     if (!isAuthenticated()) {
-      return { success: false, error: 'Not authenticated. Sign in first.' };
+      return { success: false, error: 'Not authenticated. Sign in first.', retryable: false };
     }
 
-    const team = await findTeamForWorkspace(payload.workspacePath);
+    // `complete: false` means the lookup could not be carried out -- the team
+    // directory fetch timed out, or one account's fetch failed. Answering with
+    // the terminal "no team" message makes the renderer mark the scope
+    // permanently unavailable, which hides Shared Docs for the rest of the app
+    // session even though the next request would succeed.
+    const { team, complete } = await resolveTeamForWorkspace(payload.workspacePath);
     if (!team) {
-      return { success: false, error: 'No team found for this workspace.' };
+      return complete
+        ? { success: false, error: 'No team found for this workspace.', retryable: false }
+        : { success: false, error: 'Team lookup did not complete.', retryable: true };
     }
     const orgId = team.orgId;
     const teamJwt = await getOrgScopedJwt(orgId);
     const teamMemberId = getSubFromJwt(teamJwt);
     if (!teamMemberId) {
-      return { success: false, error: 'No team member ID available.' };
+      return { success: false, error: 'No team member ID available.', retryable: true };
     }
 
     const serverUrl = getCollabSyncWsUrl();

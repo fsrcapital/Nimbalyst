@@ -11,6 +11,7 @@ import type { EditorConfig } from '@nimbalyst/runtime/editor/EditorConfig';
 import '@nimbalyst/runtime/editor/extensions/registerBuiltinExtensions';
 import '@nimbalyst/runtime/editor/index.css';
 import { registerBrowserReferenceNodes } from './referenceNodes';
+import { registerBrowserTrackerReferenceInsertion } from './trackerReferenceInsertion';
 import { CollabLexicalProvider } from '@nimbalyst/runtime/sync/CollabLexicalProvider';
 import type { DocumentSyncProvider } from '@nimbalyst/runtime/sync/DocumentSync';
 
@@ -23,17 +24,30 @@ import { applyBrowserEditorChrome } from './browserChrome';
 import { deriveCollabEditorCommentsState } from './commenting';
 import { resolveCollabEditorUser } from './presence';
 import { createCollabDocumentSession } from './session';
+import { acquireCollabAssetImageResolver } from './collabAssetImages';
+import { BrowserDocumentEmbedContext, registerBrowserDocumentEmbeds } from './documentEmbeds';
+import {
+  TrackerReferenceInlineAppearanceContext,
+  TrackerReferenceResolverProvider,
+} from '@nimbalyst/collab-client/trackers-ui/references';
 
 import type {
   CollabEditorHandle,
   CollabEditorMountOptions,
 } from './types';
 
+/** The team member id is the voting identity; personal org ids never are. */
+export function decisionMembersFromComments(members: ReturnType<NonNullable<CollabEditorMountOptions['comments']>['getMembers']>) {
+  return members.map(({ userId, name }) => ({ id: userId, name }));
+}
+
 // Must run before any editor mounts: `@lexical/yjs` resolves node types against
 // `editor._nodes` while applying the first update, and an unregistered type
 // aborts the binding so nothing paints. A call rather than a bare import on
 // purpose — see the header of `./referenceNodes`.
 registerBrowserReferenceNodes();
+registerBrowserDocumentEmbeds();
+registerBrowserTrackerReferenceInsertion();
 
 class BundleEditorErrorBoundary extends React.Component<{
   children: React.ReactNode;
@@ -75,6 +89,20 @@ export function mountCollabEditor(options: CollabEditorMountOptions): CollabEdit
   let readyReported = false;
 
   const hostCanComment = (): boolean => options.comments?.canComment?.() ?? true;
+
+  /**
+   * Serves the document's `collab-asset://` images. Only a team room has an
+   * origin and a JWT to fetch them with; an in-memory harness document has no
+   * server behind it, so it gets no resolver and its images fall through to
+   * the editor's own handling.
+   */
+  const assetImages = options.source.kind === 'team-room'
+    ? acquireCollabAssetImageResolver({
+        serverUrl: options.source.serverUrl,
+        orgId: options.source.room.orgId,
+        getTeamJwt: options.source.auth.getTeamJwt,
+      })
+    : null;
 
   // Declared before the session because DocumentSyncProvider can report a
   // status from inside its own constructor, before the provider below exists.
@@ -145,6 +173,7 @@ export function mountCollabEditor(options: CollabEditorMountOptions): CollabEdit
     getDocument: () => sharedDocument,
     getMarkdown: () => getMarkdown(),
     getState: () => session.getState(),
+    hasPendingWrites: () => session.networkProvider?.hasPendingWrites() ?? false,
     getPresence: () => presenceSurface.getPresence(),
     setPresenceActive: (active) => { presenceSurface.setActive(active); },
     flush: (flushOptions) => session.flush(flushOptions),
@@ -170,6 +199,7 @@ export function mountCollabEditor(options: CollabEditorMountOptions): CollabEdit
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      assetImages?.release();
       session.destroy({
         beforeTransportTeardown: () => {
           root?.unmount();
@@ -204,6 +234,7 @@ export function mountCollabEditor(options: CollabEditorMountOptions): CollabEdit
       isCodeHighlighted: true,
       hasLinkAttributes: true,
       markdownOnly: true,
+      resolveImageSrc: assetImages?.resolve,
       collaboration: {
         providerFactory,
         shouldBootstrap: false,
@@ -223,6 +254,19 @@ export function mountCollabEditor(options: CollabEditorMountOptions): CollabEdit
           hostCanComment: hostCanComment(),
         }).capabilities,
       } : undefined,
+      decisions: {
+        renderArtifact: options.renderDecisionArtifact,
+        getYDoc: () => sharedDocument,
+        currentUser: options.comments?.currentUser ?? { id: resolvedUser.memberId, name: resolvedUser.displayName },
+        getMembers: () => decisionMembersFromComments(options.comments?.getMembers() ?? []),
+        isHydrated: () => !session.networkProvider || session.hasConnectedOnce(),
+        canVote: () => !session.getState().readOnly && (session.networkProvider ? session.canComment() : hostCanComment()),
+        ...(session.networkProvider ? {
+          requestDecision: (command) => session.networkProvider!.requestDecision(command),
+          getDecisionState: session.networkProvider.getDecisionState,
+          onDecisionState: session.networkProvider.onDecisionState,
+        } : {}),
+      },
       onDirtyChange: (dirty) => {
         if (dirty) session.markDirty();
       },
@@ -241,10 +285,16 @@ export function mountCollabEditor(options: CollabEditorMountOptions): CollabEdit
 
     root.render(
       <BundleEditorErrorBoundary onError={(error) => options.onError?.(error)}>
-        <BrowserEditorSurface
-          config={config}
-          subscribeToPresence={subscribeToPresence}
-        />
+        <BrowserDocumentEmbedContext.Provider value={options.renderDecisionArtifact}>
+          <TrackerReferenceResolverProvider resolver={options.trackerReferences}>
+            <TrackerReferenceInlineAppearanceContext.Provider value={options.trackerReferenceAppearance ?? 'chip'}>
+              <BrowserEditorSurface
+                config={config}
+                subscribeToPresence={subscribeToPresence}
+              />
+            </TrackerReferenceInlineAppearanceContext.Provider>
+          </TrackerReferenceResolverProvider>
+        </BrowserDocumentEmbedContext.Provider>
       </BundleEditorErrorBoundary>,
     );
   }

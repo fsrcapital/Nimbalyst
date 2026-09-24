@@ -104,8 +104,9 @@ export function scanIdentityScopeViolations({
               : null;
         if (!rule || hasEscape(lines, lineIndex)) return;
         const violation = {
-          // Baseline keys are repository paths and must remain stable across
-          // Windows and POSIX runners.
+          // The baseline is committed with POSIX separators. path.relative
+          // yields backslashes on Windows, which makes every baselined entry
+          // read as both an unlisted violation and a stale baseline entry.
           file: path.relative(root, filePath).split(path.sep).join('/'),
           line: lineIndex + 1,
           rule,

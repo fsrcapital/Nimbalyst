@@ -5,7 +5,7 @@ import { shouldSyncTrackerItem, getEffectiveTrackerSharingPolicy } from '../../s
 import { ElectronDocumentService } from '../../services/ElectronDocumentService';
 import { findLinkedDocumentForLocalPath } from '../../services/CollabLocalOriginService';
 import {
-  findTeamForWorkspace,
+  resolveTeamForWorkspace,
   getOrgScopedJwt,
   listMembersWithTeamJwt,
   type TeamDetails,
@@ -42,6 +42,12 @@ export type ResourceSharingResult = {
   sourceId: string;
   teamVisible: boolean;
   orgId: string | null;
+  /**
+   * The shared document a `file` resolved to, when it already has one. Callers
+   * that hand a resource to someone else need it: a local path only names the
+   * resource on the machine that reported it.
+   */
+  documentId?: string;
   reason: 'shared' | 'notShared' | 'notFound' | 'noTeam';
 };
 
@@ -55,17 +61,26 @@ type SharingDependencies = {
   findTeam(workspacePath: string): Promise<TeamDetails | null>;
   readDocument(sourceId: string, workspacePath: string): Promise<ResourceSharingResult>;
   readTracker(sourceId: string, workspacePath: string): Promise<{ found: boolean; teamVisible: boolean }>;
-  findLinkedDocument(workspacePath: string, sourceFilePath: string): Promise<{ orgId: string } | null>;
+  findLinkedDocument(
+    workspacePath: string,
+    sourceFilePath: string,
+  ): Promise<{ orgId: string; documentId: string } | null>;
 };
 
+async function findAvailableTeam(workspacePath: string): Promise<TeamDetails | null> {
+  const resolution = await resolveTeamForWorkspace(workspacePath);
+  if (!resolution.complete) throw new Error('Organization directory is unavailable. Try again later.');
+  return resolution.team;
+}
+
 const directoryDependencies: DirectoryDependencies = {
-  findTeam: findTeamForWorkspace,
+  findTeam: findAvailableTeam,
   getTeamJwt: getOrgScopedJwt,
   listMembers: listMembersWithTeamJwt,
 };
 
 const sharingDependencies: SharingDependencies = {
-  findTeam: findTeamForWorkspace,
+  findTeam: findAvailableTeam,
   readDocument: readSharedDocumentFromRenderer,
   readTracker: readTrackerSharing,
   findLinkedDocument: findLinkedDocumentForLocalPath,
@@ -287,7 +302,14 @@ export async function readResourceSharingStatus(
     const sourceFilePath = path.isAbsolute(sourceId) ? sourceId : path.resolve(workspacePath, sourceId);
     const binding = await dependencies.findLinkedDocument(workspacePath, sourceFilePath);
     return binding
-      ? { kind, sourceId, teamVisible: true, orgId: binding.orgId, reason: 'shared' }
+      ? {
+        kind,
+        sourceId,
+        teamVisible: true,
+        orgId: binding.orgId,
+        documentId: binding.documentId,
+        reason: 'shared',
+      }
       : { kind, sourceId, teamVisible: false, orgId: null, reason: 'notShared' };
   }
 

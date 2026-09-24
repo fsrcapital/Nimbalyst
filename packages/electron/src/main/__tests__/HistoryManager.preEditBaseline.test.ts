@@ -113,12 +113,15 @@ vi.mock('../database/PGLiteDatabaseWorker', () => ({
   database: {
     isInitialized: () => true,
     initialize: vi.fn(),
+    // `getEngine` picks the JSON accessor form (json_extract on SQLite, ->> on
+    // PGLite); this fake matches the ->> shape the SQL assertions below expect.
+    getEngine: () => 'pglite',
     query: (sql: string, params?: any[]) => query(sql, params),
   },
 }));
 
-vi.mock('electron', () => ({
-  app: { getPath: vi.fn(() => '/tmp') },
+vi.mock('electron', async () => ({
+  app: { getPath: (await import('../../../test-stubs/privateUserData')).testApp.getPath },
   BrowserWindow: { getAllWindows: () => [] },
 }));
 

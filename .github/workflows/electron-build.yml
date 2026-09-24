@@ -303,6 +303,16 @@ jobs:
           fi
           echo "Verified: ${RG_EXPECTED} exists"
 
+      # The tracker packages publish only built `dist`, and the runtime imports
+      # them. The root `prepare` script builds them on a plain `npm ci`, but the
+      # Windows ARM64 path installs with --ignore-scripts, so build them
+      # explicitly here or the runtime build fails with: Failed to resolve
+      # entry for package "@nimbalyst/tracker-schema".
+      - name: Build tracker packages
+        env:
+          NODE_ENV: production
+        run: npm run build:tracker-packages
+
       - name: Build extension-sdk
         working-directory: packages/extension-sdk
         env:
@@ -357,11 +367,21 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
           security default-keychain -s "$KEYCHAIN_NAME"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
-          
+
+          # electron-builder discovers identities with `security find-identity`,
+          # which searches the keychain SEARCH LIST -- setting the default
+          # keychain alone does not put build.keychain on it. Without this the
+          # CSC_NAME identity is invisible and the build silently goes unsigned.
+          security list-keychains -d user -s "$KEYCHAIN_NAME" login.keychain
+
+          # A signed+notarized build runs well past the default auto-lock
+          # timeout; a relocked keychain fails codesign mid-build.
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_NAME"
+
           # Import certificate
           security import certificate.p12 -k "$KEYCHAIN_NAME" -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
-          
+
           # Clean up
           rm certificate.p12
 
@@ -506,9 +526,16 @@ jobs:
           # must not create GitHub Releases on its own.
           if [ "${{ matrix.platform }}" == "mac" ]; then
             if [ -n "$MACOS_CSC_LINK" ]; then
+              # Sign from the identity the "Import macOS certificates" step
+              # already put in build.keychain, and do NOT hand electron-builder
+              # CSC_LINK/CSC_KEY_PASSWORD. Given those, it imports the .p12 a
+              # second time into a temp keychain of its own; on the macOS 26.6
+              # runner image that duplicate import fails with "SecKeychainUnlock:
+              # The user name or passphrase you entered is not correct" and takes
+              # the whole mac build down (image 20260831.0337.3 vs the last green
+              # 20260728.0273.1). One keychain, one import.
               export CSC_NAME="$MACOS_CSC_NAME"
-              export CSC_LINK="$MACOS_CSC_LINK"
-              export CSC_KEY_PASSWORD="$MACOS_CSC_KEY_PASSWORD"
+              unset CSC_LINK CSC_KEY_PASSWORD
             else
               # Validation build: IS_RELEASE gated the signing material to
               # empty. Make the unsigned path explicit, the same way the
@@ -627,6 +654,7 @@ jobs:
             packages/electron/release/*.zip
             packages/electron/release/*.exe
             packages/electron/release/*.AppImage
+            packages/electron/release/*.deb
             packages/electron/release/*.yml
             packages/electron/release/*.yaml
             packages/electron/release/win-arm64-unpacked/**
@@ -799,7 +827,7 @@ jobs:
         run: |
           mkdir -p release-files
           # Copy binaries but NOT yml files (we'll regenerate those)
-          find release-artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.AppImage" \) -exec cp {} release-files/ \;
+          find release-artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" \) -exec cp {} release-files/ \;
           ls -la release-files/
 
       - name: Generate update metadata with all architectures
@@ -810,9 +838,25 @@ jobs:
           cp ../../release-files/*.dmg ../../release-files/*.zip release/ 2>/dev/null || true
           cp ../../release-files/*.exe release/ 2>/dev/null || true
           cp ../../release-files/*.AppImage release/ 2>/dev/null || true
+          cp ../../release-files/*.deb release/ 2>/dev/null || true
           ls -la release/
           # Generate yml files with all architectures present
           node build/generate-update-yml.js
+          # Every Linux binary staged above must appear in latest-linux.yml.
+          # electron-updater routes each install method to its own entry by file
+          # extension, so a package type that is built but missing from the
+          # channel file silently stops updating (#1430). The copies above are
+          # `|| true`, so without this the omission would never surface.
+          for binary in release/*.AppImage release/*.deb; do
+            [ -e "$binary" ] || continue
+            name=$(basename "$binary")
+            if ! grep -q "url: ${name}$" release/latest-linux.yml; then
+              echo "::error::${name} was built but is missing from latest-linux.yml"
+              cat release/latest-linux.yml
+              exit 1
+            fi
+            echo "latest-linux.yml lists ${name}"
+          done
           # Copy generated yml files back to release-files
           cp release/*.yml ../../release-files/ 2>/dev/null || true
           cp release/*.yaml ../../release-files/ 2>/dev/null || true
@@ -893,7 +937,10 @@ jobs:
             echo ""
             echo "- **macOS**: Download the .dmg file"
             echo "- **Windows**: Download the .exe file"
-            echo "- **Linux**: Download the .AppImage file"
+            echo "- **Linux (Debian, Ubuntu)**: Download the .deb file"
+            echo "- **Linux (other distributions)**: Download the .AppImage file"
+            echo ""
+            echo "On Ubuntu 24.04 and later the AppImage needs an AppArmor profile before it will start: see [Linux installation](https://github.com/nimbalyst/nimbalyst/blob/main/docs/LINUX_INSTALL.md)."
           } > release-files/GITHUB_RELEASE_BODY.md
 
           echo "Release notes generated"
