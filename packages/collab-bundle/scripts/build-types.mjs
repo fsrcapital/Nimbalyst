@@ -14,6 +14,21 @@ const publicEntries = ['commenting-ui', 'docs-ui', 'feedback-ui', 'trackers-ui',
   public: path.join(typesRoot, `${entryName}.d.ts`),
 }));
 const require = createRequire(import.meta.url);
+const retryWait = new Int32Array(new SharedArrayBuffer(4));
+
+function writeDeclarationFile(filePath, contents) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.writeFileSync(filePath, contents);
+      return;
+    } catch (error) {
+      const code = error && typeof error === 'object' ? error.code : undefined;
+      const retryable = process.platform === 'win32' && ['UNKNOWN', 'EPERM', 'EBUSY'].includes(code);
+      if (!retryable || attempt >= 9) throw error;
+      Atomics.wait(retryWait, 0, 0, 25 * (attempt + 1));
+    }
+  }
+}
 
 fs.rmSync(internalRoot, { recursive: true, force: true });
 
@@ -90,7 +105,7 @@ for (const declarationFile of declarationFiles(internalRoot)) {
       return `${quote}${relativeDeclarationSpecifier(declarationFile, target)}${quote}`;
     },
   );
-  fs.writeFileSync(declarationFile, rewritten);
+  writeDeclarationFile(declarationFile, rewritten);
 }
 
 for (const entry of publicEntries) {
@@ -105,6 +120,6 @@ for (const entry of publicEntries) {
       return `${quote}${relativeDeclarationSpecifier(entry.public, target)}${quote}`;
     },
   );
-  fs.writeFileSync(entry.public, publicTypes);
+  writeDeclarationFile(entry.public, publicTypes);
 }
 fs.rmSync(path.join(internalRoot, 'collab-bundle'), { recursive: true, force: true });
