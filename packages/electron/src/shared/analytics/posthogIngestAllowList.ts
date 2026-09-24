@@ -397,6 +397,7 @@ export const INTENTIONALLY_DROPPED = [
   'voice_session_started',
   'voice_voice_mismatch',
   'walkthrough_step_viewed',
+  'web_app_qr_pairing_opened',
   'windows_claude_code_warning_closed',
   'windows_claude_code_warning_dismissed_forever',
   'windows_claude_code_warning_shown',

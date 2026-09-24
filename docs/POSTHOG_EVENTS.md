@@ -463,6 +463,7 @@ Because the dedup key is the user's *local* date, a user far from the project ti
 | `sync_enabled` | `SyncPanel.tsx` | User enables session sync toggle | `projectCount` (exact number) | (pending release) |  |
 | `sync_disabled` | `SyncPanel.tsx` | User disables session sync toggle | `projectCount` (exact number) | (pending release) |  |
 | `sync_qr_pairing_opened` | `SyncPanel.tsx` | User opens the QR pairing modal | None | (pending release) |  |
+| `web_app_qr_pairing_opened` | `SyncPanel.tsx` | User opens the Web App QR pairing modal | None | (pending release) | Intentionally dropped at ingestion, matching the native QR-open event |
 | `sync_auth_callback_completed` | `StytchAuthService.ts` | Deep link auth callback completes successfully (authoritative sign-in) | None | (pending release) |  |
 
 ### Voice Mode
