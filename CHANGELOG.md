@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 <!-- New features go here -->
-- GPT-6.1 Sol is available for Codex sessions with reasoning levels through Ultra.
+- GPT-6.1 Sol is available for Codex sessions using ChatGPT accounts with reasoning levels through Ultra.
 - Sessions can keep their prompt cache warm until manually disabled from the workflow form, with the enabled state restored and synchronized for standalone and nested workstream sessions.
 
 ### Changed
