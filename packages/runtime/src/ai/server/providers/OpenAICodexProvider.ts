@@ -122,7 +122,8 @@ export class OpenAICodexProvider extends BaseAgentProvider {
     maxTokens: number;
   }> = [
     // GPT-6 catalog entries require codex >= 0.153.0 (Astra) and >= 0.155.0
-    // (Sol, Luna); the catalog lists a 272k default context window for all three.
+    // (Sol, Luna); Codex uses a 272k default context window for this family.
+    { id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', contextWindow: 272000, maxTokens: 128000 },
     { id: 'gpt-6-sol', name: 'GPT-6 Sol', contextWindow: 272000, maxTokens: 128000 },
     { id: 'gpt-6-astra', name: 'GPT-6 Astra', contextWindow: 272000, maxTokens: 128000 },
     { id: 'gpt-6-luna', name: 'GPT-6 Luna', contextWindow: 272000, maxTokens: 128000 },
