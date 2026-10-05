@@ -3478,7 +3478,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
         id: ModelIdentifier.create('claude-code', variant).combined,
         name: `Claude Agent · ${CLAUDE_CODE_MODEL_LABELS[variant]} ${CLAUDE_CODE_VARIANT_VERSIONS[variant]}`,
         provider: 'claude-code' as const,
-        maxTokens: 8192,
+        maxTokens: variant === 'sonnet' ? 128000 : 8192,
         contextWindow: baseContextWindowForVariant(variant)
       });
 

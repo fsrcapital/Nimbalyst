@@ -5,6 +5,7 @@ import {
   baseContextWindowForVariant,
   CLAUDE_CODE_NATIVE_1M_VARIANTS,
   CLAUDE_CODE_VARIANTS_WITH_1M,
+  CLAUDE_MODELS,
 } from '../modelConstants';
 
 /**
@@ -39,7 +40,7 @@ describe('resolveClaudeCodeParentContextWindow', () => {
     ).toBe(1_000_000);
     expect(
       resolveClaudeCodeParentContextWindow('claude-code:sonnet', {
-        'claude-sonnet-5': { contextWindow: 1_000_000 },
+        'claude-sonnet-5-5': { contextWindow: 1_000_000 },
       }),
     ).toBe(1_000_000);
   });
@@ -105,10 +106,20 @@ describe('claudeCodeFamilyKeyword', () => {
  * explicit `-1m` row exists again for users who must force it.
  */
 describe('1M variant lists', () => {
+  it('includes the released Sonnet 5.5 API model with Anthropic limits', () => {
+    expect(CLAUDE_MODELS.find(({ id }) => id === 'claude-sonnet-5-5')).toMatchObject({
+      displayName: 'Claude Sonnet 5.5 (1M)',
+      shortName: 'Sonnet 5.5',
+      maxTokens: 128000,
+      contextWindow: 1_000_000,
+    });
+  });
+
   it('keeps the plain rows seeded at 1M so the SDK-path meter cannot exceed 100% (#825)', () => {
     expect(CLAUDE_CODE_NATIVE_1M_VARIANTS).toContain('opus');
     expect(CLAUDE_CODE_NATIVE_1M_VARIANTS).toContain('fable');
     expect(CLAUDE_CODE_NATIVE_1M_VARIANTS).toContain('sonnet');
+    expect(CLAUDE_CODE_NATIVE_1M_VARIANTS).toContain('sonnet-5');
     expect(CLAUDE_CODE_NATIVE_1M_VARIANTS).not.toContain('haiku');
   });
 

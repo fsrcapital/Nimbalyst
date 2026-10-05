@@ -40,7 +40,8 @@ public enum ModelLabel {
         "opus": "5.5",
         "opus-5-5": "5.5",
         "opus-5": "5",
-        "sonnet": "5",
+        "sonnet": "5.5",
+        "sonnet-5": "5",
         "haiku": "4.5",
         "opus-4-8": "4.8",
         "opus-4-7": "4.7",
@@ -115,6 +116,7 @@ public enum ModelLabel {
 
     /// Mirrors `CLAUDE_MODELS[*].shortName` in `modelConstants.ts`.
     private static let claudeApiShortNames: [String: String] = [
+        "claude-sonnet-5-5": "Sonnet 5.5",
         "claude-fable-5": "Fable 5",
         "claude-sonnet-5": "Sonnet 5",
         "claude-opus-5": "Opus 5",

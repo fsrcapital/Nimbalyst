@@ -12,11 +12,13 @@ describe('resolveClaudeCodeModelVariant', () => {
 
   describe('standard variants (no extended context)', () => {
     it('resolves sonnet variant', () => {
-      expect(resolveClaudeCodeModelVariant('claude-code:sonnet', DEFAULT_MODEL)).toBe('sonnet');
+      expect(resolveClaudeCodeModelVariant('claude-code:sonnet', DEFAULT_MODEL)).toBe('claude-sonnet-5-5');
     });
 
-    it('accepts the current Sonnet generation alias used by saved defaults', () => {
-      expect(resolveClaudeCodeModelVariant('claude-code:sonnet-5', DEFAULT_MODEL)).toBe('sonnet');
+    it('pins the current Sonnet 5.5 model and preserves Sonnet 5', () => {
+      expect(resolveClaudeCodeModelVariant('claude-code:sonnet', DEFAULT_MODEL)).toBe('claude-sonnet-5-5');
+      expect(resolveClaudeCodeModelVariant('claude-code:sonnet-5-5', DEFAULT_MODEL)).toBe('claude-sonnet-5-5');
+      expect(resolveClaudeCodeModelVariant('claude-code:sonnet-5', DEFAULT_MODEL)).toBe('claude-sonnet-5');
     });
 
     it('resolves opus variant', () => {
@@ -49,14 +51,14 @@ describe('resolveClaudeCodeModelVariant', () => {
   });
 
   describe('extended context (1M) variants', () => {
-    it('sonnet-1m resolves to sonnet[1m] (Sonnet 4.6)', () => {
+    it('sonnet-1m resolves to Sonnet 5.5 with the legacy 1M suffix', () => {
       const result = resolveClaudeCodeModelVariant('claude-code:sonnet-1m', DEFAULT_MODEL);
-      expect(result).toBe('sonnet[1m]');
+      expect(result).toBe('claude-sonnet-5-5[1m]');
     });
 
-    it('sonnet-5-1m alias resolves to sonnet[1m]', () => {
+    it('sonnet-5-1m resolves to the pinned Sonnet 5 model with [1m]', () => {
       const result = resolveClaudeCodeModelVariant('claude-code:sonnet-5-1m', DEFAULT_MODEL);
-      expect(result).toBe('sonnet[1m]');
+      expect(result).toBe('claude-sonnet-5[1m]');
     });
 
     it('opus-1m resolves to pinned 5.5 with [1m]', () => {
@@ -82,7 +84,7 @@ describe('resolveClaudeCodeModelVariant', () => {
 
   describe('SDK compatibility', () => {
     it('standard variants are valid SDK model values', () => {
-      const validSdkValues = ['sonnet', 'claude-opus-5-5', 'haiku'];
+      const validSdkValues = ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-sonnet-5', 'haiku'];
       for (const variant of ['sonnet', 'opus', 'haiku']) {
         const result = resolveClaudeCodeModelVariant(`claude-code:${variant}`, DEFAULT_MODEL);
         expect(validSdkValues).toContain(result);
@@ -158,7 +160,7 @@ describe('resolveClaudeCodeModelVariant', () => {
     });
 
     it('handles raw variant names without provider prefix', () => {
-      expect(resolveClaudeCodeModelVariant('sonnet', DEFAULT_MODEL)).toBe('sonnet');
+      expect(resolveClaudeCodeModelVariant('sonnet', DEFAULT_MODEL)).toBe('claude-sonnet-5-5');
     });
 
     it('handles raw variant names with -1m suffix', () => {

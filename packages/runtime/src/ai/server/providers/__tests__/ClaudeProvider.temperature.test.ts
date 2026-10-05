@@ -72,6 +72,7 @@ describe('ClaudeProvider.supportsTemperature', () => {
       // Sonnet 5 adopted the Opus 4.7+ posture: adaptive thinking, effort
       // parameter, and no sampling parameters (temperature returns HTTP 400).
       expect(ClaudeProvider.supportsTemperature('claude-sonnet-5')).toBe(false);
+      expect(ClaudeProvider.supportsTemperature('claude-sonnet-5-5')).toBe(false);
     });
 
     it('returns false for a future dated/minor Sonnet 5 id', () => {

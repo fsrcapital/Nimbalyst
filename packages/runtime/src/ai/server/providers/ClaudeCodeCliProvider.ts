@@ -88,7 +88,7 @@ export class ClaudeCodeCliProvider extends BaseAgentProvider {
         id: ModelIdentifier.create('claude-code-cli', variant).combined,
         name: `Claude Code CLI · ${CLAUDE_CODE_MODEL_LABELS[variant]} ${CLAUDE_CODE_VARIANT_VERSIONS[variant]}`,
         provider: 'claude-code-cli' as const,
-        maxTokens: 8192,
+        maxTokens: variant === 'sonnet' ? 128000 : 8192,
         // Current-gen variants run 1M natively (see baseContextWindowForVariant / #825).
         contextWindow: baseContextWindowForVariant(variant),
       });

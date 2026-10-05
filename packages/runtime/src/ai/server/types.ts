@@ -292,14 +292,14 @@ export function shouldBlockStartedSessionProviderSwitch(
  * `fable` is the Fable tier above Opus (currently Fable 5.1). `fable-5` is the
  * pinned previous-generation Fable. Both run a 1M window natively.
  */
-export const CLAUDE_CODE_VARIANTS = ['fable', 'fable-5', 'opus', 'opus-5', 'opus-4-8', 'opus-4-7', 'opus-4-6', 'sonnet', 'sonnet-4-6', 'haiku'] as const;
+export const CLAUDE_CODE_VARIANTS = ['fable', 'fable-5', 'opus', 'opus-5', 'opus-4-8', 'opus-4-7', 'opus-4-6', 'sonnet', 'sonnet-5', 'sonnet-4-6', 'haiku'] as const;
 
 /**
  * Resolves a configured model string to the SDK model value.
  *
  * Key behaviors:
- * - Canonical variants use an explicit model ID when mapped (Opus/Fable);
- *   other aliases are passed through for the SDK to resolve.
+ * - Canonical variants use an explicit model ID when mapped; all current
+ *   Claude models are pinned to the release shown in the picker.
  * - Pinned variants (opus-4-6, ...) are substituted for their full Anthropic
  *   model ID from CLAUDE_CODE_PINNED_SDK_MODELS, so they always resolve to a
  *   specific version regardless of what "latest" becomes.
